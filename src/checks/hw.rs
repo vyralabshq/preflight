@@ -147,9 +147,9 @@ pub fn cores(ctx: &Ctx) -> Outcome {
 pub fn memory(ctx: &Ctx) -> Outcome {
     const WHY: &str = "Anza suggests a motherboard with 512 GB capacity and ECC memory. That is \
         a suggestion about the board, not a stated minimum for the process, so preflight reports \
-        what is installed rather than failing a box against a number Anza did not publish. \
-        Accounts and index live in memory; running short shows up as an OOM kill hours into a \
-        run, not at startup.";
+        what is installed and leaves the judgement to you. Accounts and index live in memory, and \
+        running short shows up as an OOM kill hours into a run rather than at startup, so it is \
+        worth knowing your headroom even though no threshold is published.";
     const EXPECTED: &str = "512 GB board capacity suggested by Anza; no hard minimum published";
 
     if let Some(o) = needs_linux(ctx, WHY) {
@@ -169,17 +169,11 @@ pub fn memory(ctx: &Ctx) -> Outcome {
     let gb = kb as f64 / 1024.0 / 1024.0;
     let observed = format!("{gb:.1} GB installed");
 
-    // No published minimum, so report unless the number is obviously unworkable.
-    match (ctx.profile, gb) {
-        (Profile::Local, _) => Outcome::pass(observed, "enough for a test validator").why(WHY),
-        (_, g) if g < 128.0 => {
-            Outcome::fail(observed, EXPECTED)
-                .why(WHY)
-                .fix(vec![FixStep::noted(
-                    "add memory before joining a cluster",
-                    "well under any published guidance; the node will be OOM-killed under load",
-                )])
-        }
+    // Anza publishes no minimum, so this reports and does not judge. An earlier
+    // version failed anything under 128 GB, a number nobody published, and it
+    // failed a working validator.
+    match ctx.profile {
+        Profile::Local => Outcome::pass(observed, "enough for a test validator").why(WHY),
         _ => Outcome::unknown(observed).expected(EXPECTED).why(WHY),
     }
 }

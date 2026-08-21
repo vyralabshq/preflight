@@ -1,6 +1,23 @@
 [package]
-name = "preflight"
+name = "vyra-preflight"
 version = "0.1.0"
 edition = "2024"
+description = "Read-only preflight checks for Solana validator hosts"
+license = "Apache-2.0"
+repository = "https://github.com/vyralabshq/preflight"
+readme = "README.md"
+keywords = ["solana", "validator", "agave", "ops"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "preflight"
+path = "src/main.rs"
 
 [dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+strip = true
+lto = true

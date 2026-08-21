@@ -222,18 +222,48 @@ fn proc_environ(fs: &Rootfs, pid: &str) -> BTreeMap<String, String> {
     env
 }
 
-/// Find the unit that would launch this validator, so a running process still
-/// tells the operator which file to edit.
+/// The unit that owns a running process, from systemd's own bookkeeping.
+///
+/// /proc/<pid>/cgroup names the unit exactly. Guessing by scanning unit files
+/// for the word "validator" matches anything that merely mentions one, and then
+/// every fix points at the wrong file and restarts the wrong service.
+fn unit_of_pid(fs: &Rootfs, pid: &str) -> Option<String> {
+    let text = fs.read(format!("/proc/{pid}/cgroup")).ok()?;
+    text.lines()
+        .filter_map(|l| l.rsplit('/').next())
+        .find(|seg| seg.ends_with(".service"))
+        .map(str::to_string)
+}
+
+/// Details for a unit named by systemd, or found by scanning when no process is
+/// running. The scan only accepts a unit whose ExecStart actually reaches a
+/// validator binary, directly or through a wrapper script.
+fn unit_details(fs: &Rootfs, name: &str) -> Option<(String, String, String)> {
+    let path = unit_files(fs)
+        .into_iter()
+        .find(|p| p.file_name().is_some_and(|f| f == name))?;
+    let text = std::fs::read_to_string(&path).ok()?;
+    let (exec, _) = parse_unit(&text)?;
+    let abs = format!("/etc/systemd/system/{name}");
+    let first = split_words(&exec).first().cloned().unwrap_or_default();
+    let edit = match is_validator_bin(&first) {
+        true => abs.clone(),
+        false => first,
+    };
+    Some((abs, name.to_string(), edit))
+}
+
 fn owning_unit(fs: &Rootfs) -> Option<(String, String, String)> {
     for unit in unit_files(fs) {
         let text = std::fs::read_to_string(&unit).ok()?;
-        if !VALIDATOR_BINS.iter().any(|b| text.contains(b)) && !text.contains("validator") {
+        if !launches_a_validator(fs, &text) {
             continue;
         }
         let name = unit.file_name()?.to_string_lossy().to_string();
         let abs = format!("/etc/systemd/system/{name}");
-        let (exec, _) = parse_unit(&text);
-        let exec = exec?;
+        let Some((exec, _)) = parse_unit(&text) else {
+            continue;
+        };
         let first = split_words(&exec).first().cloned().unwrap_or_default();
         let edit = if is_validator_bin(&first) {
             abs.clone()
@@ -245,6 +275,25 @@ fn owning_unit(fs: &Rootfs) -> Option<(String, String, String)> {
     None
 }
 
+/// True when this unit's ExecStart reaches a validator binary, either directly
+/// or through the wrapper script it points at.
+fn launches_a_validator(fs: &Rootfs, text: &str) -> bool {
+    let Some((exec, _)) = parse_unit(text) else {
+        return false;
+    };
+    let words = split_words(&exec);
+    if words.first().is_some_and(|w| is_validator_bin(w)) {
+        return true;
+    }
+    let Some(script) = words.first() else {
+        return false;
+    };
+    fs.read(script)
+        .ok()
+        .and_then(|body| exec_line_from_script(&body))
+        .is_some()
+}
+
 fn unit_files(fs: &Rootfs) -> Vec<std::path::PathBuf> {
     let mut v = fs.list("/etc/systemd/system");
     v.extend(fs.list("/lib/systemd/system"));
@@ -252,9 +301,9 @@ fn unit_files(fs: &Rootfs) -> Vec<std::path::PathBuf> {
     v
 }
 
-fn parse_unit(text: &str) -> (Option<String>, BTreeMap<String, String>) {
+fn parse_unit(text: &str) -> Option<(String, BTreeMap<String, String>)> {
     let joined = join_continuations(text);
-    let mut exec = None;
+    let mut exec: Option<String> = None;
     let mut env = BTreeMap::new();
     for line in joined.lines() {
         let l = line.trim();
@@ -272,7 +321,7 @@ fn parse_unit(text: &str) -> (Option<String>, BTreeMap<String, String>) {
             }
         }
     }
-    (exec, env)
+    Some((exec?, env))
 }
 
 fn exec_line_from_script(text: &str) -> Option<Vec<String>> {
@@ -302,7 +351,10 @@ pub fn resolve(fs: &Rootfs) -> Result<Invocation, Vec<String>> {
         let env = proc_environ(fs, &pid);
         if let Some(mut inv) = build(Origin::RunningProcess, words, trail.clone(), env) {
             inv.pid = Some(pid);
-            if let Some((path, name, edit)) = owning_unit(fs) {
+            let owner = unit_of_pid(fs, inv.pid.as_deref().unwrap_or_default())
+                .and_then(|name| unit_details(fs, &name))
+                .or_else(|| owning_unit(fs));
+            if let Some((path, name, edit)) = owner {
                 inv.unit_path = Some(path);
                 inv.unit_name = Some(name);
                 inv.edit_target = Some(edit);
@@ -325,8 +377,9 @@ pub fn resolve(fs: &Rootfs) -> Result<Invocation, Vec<String>> {
             .to_string_lossy()
             .to_string();
         let abs = format!("/etc/systemd/system/{name}");
-        let (exec, env) = parse_unit(&text);
-        let Some(exec) = exec else { continue };
+        let Some((exec, env)) = parse_unit(&text) else {
+            continue;
+        };
         trail.push(format!("unit {name}: ExecStart={exec}"));
 
         let words = split_words(&exec);

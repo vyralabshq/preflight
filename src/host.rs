@@ -149,7 +149,13 @@ pub fn gather(fs: &Rootfs) -> Facts {
                 continue;
             }
             let (src, target, fstype) = (p[0], p[1], p[2]);
-            if !src.starts_with("/dev/") {
+            // snap loopbacks and the boot partition are not validator storage,
+            // and a real host has a dozen of them burying the disks that are.
+            let noise = !src.starts_with("/dev/")
+                || fstype == "squashfs"
+                || target.starts_with("/snap/")
+                || target.starts_with("/boot");
+            if noise {
                 continue;
             }
             f.mounts.push(Mount {

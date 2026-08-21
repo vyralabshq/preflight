@@ -149,7 +149,7 @@ fn system_report(ctx: &Ctx, st: &Style, needs_root: usize) -> String {
         };
         row!(
             if i == 0 { "storage" } else { "" },
-            format!("{:<14}{:<8}{free}", m.target, m.fstype)
+            format!("{:<16}{:<10}{free}", m.target, m.fstype)
         );
     }
 

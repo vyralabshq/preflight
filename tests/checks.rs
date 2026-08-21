@@ -43,7 +43,9 @@ pub const FRESH_UBUNTU: Host = Host {
     disks: &[("sda", 500, false)],
     mounts: "/dev/sda1 / ext4 rw,relatime 0 0\n\
              /dev/sda2 /mnt/accounts ext4 rw,noatime 0 0\n\
-             /dev/sda3 /mnt/ledger ext4 rw,noatime 0 0\n",
+             /dev/sda3 /mnt/ledger ext4 rw,noatime 0 0\n\
+             /dev/loop0 /snap/core20/2599 squashfs ro,nodev 0 0\n\
+             /dev/sda1 /boot/efi vfat rw,relatime 0 0\n",
     sysctl: &[
         ("net/core/rmem_max", "212992"),
         ("net/core/wmem_max", "212992"),
@@ -1027,7 +1029,7 @@ fn the_machine_question_comes_before_the_validator_question() {
 #[test]
 fn each_question_gets_its_own_verdict() {
     let (bare, _) = run(&["--root", &host(&FRESH_UBUNTU), "--profile", "testnet"]);
-    assert!(bare.contains("no. 4 things must be fixed first"), "{bare}");
+    assert!(bare.contains("must be fixed first"), "{bare}");
     assert!(
         bare.contains("no validator installed, nothing to check"),
         "{bare}"
@@ -1154,4 +1156,152 @@ fn nothing_is_ever_run_with_sudo() {
             assert!(!invokes, "{}:{} runs sudo: {line}", f.display(), n + 1);
         }
     }
+}
+
+/// A unit that merely mentions a validator is not the unit running one.
+/// Matching on the word alone pointed every fix at the wrong file and told the
+/// operator to restart the wrong service.
+#[test]
+fn a_unit_that_only_mentions_a_validator_is_not_chosen() {
+    let decoy = Host {
+        name: "decoy-unit",
+        files: &[
+            (
+                "/etc/systemd/system/collector.service",
+                "[Unit]\nDescription=vyralabs validator metrics collector\n\n\
+                 [Service]\nExecStart=/home/sol/collector/target/release/collector\n",
+            ),
+            (
+                "/etc/systemd/system/sol.service",
+                "[Service]\nUser=sol\nExecStart=/home/sol/bin/validator.sh\n",
+            ),
+            (
+                "/home/sol/bin/validator.sh",
+                "#!/usr/bin/env bash\nexec agave-validator --ledger /l --accounts /a \
+                 --dynamic-port-range 8000-8030\n",
+            ),
+        ],
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let (o, _) = run(&["--root", &host(&decoy), "--client", "agave-validator@4.2.1"]);
+    assert!(
+        o.contains("/home/sol/bin/validator.sh"),
+        "must find the real one:\n{o}"
+    );
+    assert!(
+        !o.contains("collector"),
+        "must not pick a unit that only mentions one:\n{o}"
+    );
+}
+
+/// A real host carries a dozen snap loopbacks and a boot partition. None are
+/// validator storage, and listing them buries the disks that are.
+#[test]
+fn snap_and_boot_mounts_stay_out_of_the_report() {
+    let (o, _) = run(&["--root", &host(&FRESH_UBUNTU), "--profile", "testnet"]);
+    assert!(o.contains("/mnt/accounts"), "{o}");
+    assert!(
+        !o.contains("squashfs"),
+        "snap loopbacks are not storage:\n{o}"
+    );
+    assert!(!o.contains("/boot/efi"), "{o}");
+}
+
+/// Anza publishes no memory minimum, so this reports and does not judge. An
+/// invented 128 GB threshold failed a working 125 GB validator.
+#[test]
+fn memory_is_reported_not_failed() {
+    let small = Host {
+        name: "small-memory",
+        mem_kb: 131_500_000,
+        ..FRESH_UBUNTU
+    };
+    let (o, _) = run(&["--root", &host(&small), "--profile", "testnet", "-v"]);
+    let block = o.split("PF-HW-0005").nth(1).unwrap_or_default();
+    let head: String = block.lines().take(2).collect::<Vec<_>>().join(" ");
+    assert!(
+        !head.contains("FAIL"),
+        "no published minimum means no failure:\n{head}"
+    );
+}
+
+/// Anza's page carries one set of figures with no cluster attached, so a
+/// testnet box must not be failed against them as though they were a rule.
+#[test]
+fn storage_figures_are_reported_not_treated_as_a_testnet_rule() {
+    let (o, _) = run(&["--root", &host(&FRESH_UBUNTU), "--profile", "testnet"]);
+    let block = o.split("PF-FS-0001").nth(1).unwrap_or_default();
+    let head: String = block.lines().take(2).collect::<Vec<_>>().join(" ");
+    assert!(
+        head.contains("degraded"),
+        "not fatal on an unlabelled figure: {head}"
+    );
+    assert!(block.contains("does not say which cluster"), "{block}");
+    assert!(
+        !o.contains("PF-FS-0001,"),
+        "must not be listed among startup blockers:\n{o}"
+    );
+}
+
+/// Anza cautions about accounts and ledger sharing a disk. It says nothing
+/// about snapshots, which operators deliberately keep beside the ledger.
+#[test]
+fn snapshots_beside_the_ledger_is_not_a_finding() {
+    let shared_snapshots = Host {
+        name: "snapshots-with-ledger",
+        disks: &[("nvme0n1", 2000, false), ("nvme1n1", 2000, false)],
+        mounts: "/dev/nvme0n1p1 / ext4 rw,noatime 0 0\n\
+                 /dev/nvme1n1 /mnt/accounts ext4 rw,noatime 0 0\n",
+        files: &[],
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let inv = invocation(
+        "shared-snapshots.txt",
+        "exec agave-validator --accounts /mnt/accounts --ledger /ledger \
+         --snapshots /ledger/snapshot-store --dynamic-port-range 8000-8030\n",
+    );
+    let (o, _) = run(&[
+        "--root",
+        &host(&shared_snapshots),
+        "--invocation",
+        inv.to_str().unwrap(),
+        "--client",
+        "agave-validator@4.2.1",
+        "--profile",
+        "testnet",
+    ]);
+    let block = o.split("PF-FS-0002").nth(1).unwrap_or_default();
+    let head: String = block.lines().take(2).collect::<Vec<_>>().join(" ");
+    assert!(
+        !head.contains("FAIL"),
+        "snapshots beside the ledger is normal:\n{head}"
+    );
+}
+
+/// noatime is operator practice. Anza's requirements page does not mention it,
+/// so citing that page for it would be inventing a source.
+#[test]
+fn noatime_is_not_cited_to_anza() {
+    let inv = invocation(
+        "noatime-check.txt",
+        "exec agave-validator --accounts /mnt/shared/a --ledger /mnt/shared/l\n",
+    );
+    let (o, _) = run(&[
+        "--root",
+        &host(&SHARED_DISK),
+        "--invocation",
+        inv.to_str().unwrap(),
+        "--client",
+        "agave-validator@4.2.1",
+        "--profile",
+        "testnet",
+        "-v",
+    ]);
+    let block = o.split("PF-FS-0004").nth(1).unwrap_or_default();
+    let cited = block.split("source").nth(1).unwrap_or_default();
+    assert!(
+        !cited.contains("docs.anza.xyz"),
+        "Anza does not publish noatime:\n{cited}"
+    );
+    assert!(block.contains("Anza does not publish this one"), "{block}");
 }

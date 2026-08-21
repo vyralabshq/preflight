@@ -17,6 +17,15 @@ pub const S_REQ: &[Source] = &[Source {
     verified_against: "2026-08",
     provisional: false,
 }];
+
+/// noatime is common operator practice, not something Anza publishes. Citing
+/// their requirements page for it would be inventing a source.
+pub const S_OPERATOR: &[Source] = &[Source {
+    kind: Operator,
+    locator: "operator practice, not published by Anza",
+    verified_against: "2026-08",
+    provisional: false,
+}];
 pub const S_DIO: &[Source] = &[Source {
     kind: AgaveChangelog,
     locator: "v4.0 Validator/Changes",
@@ -123,10 +132,11 @@ fn unwrap_all(v: Vec<Result<String, String>>) -> Vec<String> {
 
 /// PF-FS-0001. Enough storage, and where it has to go.
 pub fn capacity(ctx: &Ctx) -> Outcome {
-    const WHY: &str = "Anza specifies three NVMe devices: accounts at 1 TB or larger, ledger at \
-        1 TB or larger, and snapshots at 500 GB or larger, all with high write endurance. That is \
-        about 2.5 TB in total. Running short does not fail at startup; it fails partway through a \
-        snapshot download or weeks later when the ledger grows into the space you did not have.";
+    const WHY: &str = "Anza gives one set of figures and does not say which cluster they are \
+        for: accounts 1 TB, ledger 1 TB, snapshots 500 GB, all high write endurance. Operators \
+        run testnet on considerably less. preflight reports the comparison rather than failing a \
+        box against numbers that were never labelled testnet. What does bite is running out \
+        partway through a snapshot download, or weeks later as the ledger grows.";
     let expected = format!("about {NEED_TOTAL_GB:.0} GB across the validator's paths");
 
     if let Some(o) = needs_linux(ctx, WHY) {
@@ -206,16 +216,21 @@ pub fn capacity(ctx: &Ctx) -> Outcome {
     if short.is_empty() {
         return Outcome::pass(seen.join(", "), expected).why(WHY);
     }
-    Outcome::fail(short.join("; "), expected).why(WHY)
+    Outcome::fail(short.join("; "), expected)
+        .why(WHY)
+        .fix(vec![FixStep::noted(
+            "compare these against how much your cluster actually uses",
+            "operators run testnet well below Anza's figures; mainnet is where they bite",
+        )])
 }
 
 /// PF-FS-0002. Separate devices. Degraded, never Fatal: Anza permits sharing.
 pub fn separate_devices(ctx: &Ctx) -> Outcome {
-    const WHY: &str = "Anza's requirements say accounts and ledger can live on the same disk but \
-        that it is not recommended, because both are IOPS-heavy and they contend. This is a \
-        recommendation, not a rule: a node with shared storage runs, it just has less headroom \
-        when the cluster gets busy.";
-    const EXPECTED: &str = "accounts, ledger and snapshots on separate block devices";
+    const WHY: &str = "Anza says accounts and ledger can share a disk but that it is not \
+        recommended, because both are IOPS-heavy and contend. It says nothing about snapshots, \
+        which are written in bursts and are commonly kept alongside the ledger on purpose. \
+        preflight only reports the pairing Anza actually cautions about.";
+    const EXPECTED: &str = "accounts and ledger on separate block devices";
 
     if let Some(o) = needs_linux(ctx, WHY) {
         return o;
@@ -253,27 +268,27 @@ pub fn separate_devices(ctx: &Ctx) -> Outcome {
             .expected(EXPECTED)
             .why(WHY);
     }
-    let mut shared = Vec::new();
-    for i in 0..devices.len() {
-        for j in i + 1..devices.len() {
-            if devices[i].1 == devices[j].1 {
-                shared.push(format!(
-                    "{} and {} both on {}",
-                    devices[i].0, devices[j].0, devices[i].1
-                ));
-            }
-        }
-    }
+    // Only the pairing Anza cautions about. Snapshots alongside the ledger is a
+    // normal, deliberate choice and not something they warn against.
+    let device_of = |label: &str| {
+        devices
+            .iter()
+            .find(|(l, _)| l == label)
+            .map(|(_, d)| d.clone())
+    };
     let listing: Vec<String> = devices.iter().map(|(l, d)| format!("{l} on {d}")).collect();
-    if shared.is_empty() {
-        return Outcome::pass(listing.join(", "), EXPECTED).why(WHY);
+
+    match (device_of("accounts"), device_of("ledger")) {
+        (Some(a), Some(l)) if a == l => {
+            Outcome::fail(format!("accounts and ledger both on {a}"), EXPECTED)
+                .why(WHY)
+                .fix(vec![FixStep::noted(
+                    "move accounts or ledger to its own device",
+                    "the node still runs either way; expect less headroom when the cluster is busy",
+                )])
+        }
+        _ => Outcome::pass(listing.join(", "), EXPECTED).why(WHY),
     }
-    Outcome::fail(shared.join("; "), EXPECTED)
-        .why(WHY)
-        .fix(vec![FixStep::noted(
-            "move one of them to its own device",
-            "if that is not possible, the node still runs; expect less headroom under load",
-        )])
 }
 
 /// PF-FS-0003. Solid-state, and not somebody else's disk over a network.
@@ -328,9 +343,10 @@ pub fn storage_media(ctx: &Ctx) -> Outcome {
 
 /// PF-FS-0004. noatime.
 pub fn noatime(ctx: &Ctx) -> Outcome {
-    const WHY: &str = "Without noatime the kernel writes an access timestamp every time the \
-        validator reads a file, which on an accounts database means a metadata write behind a \
-        large share of reads. It costs write endurance for information nothing uses.";
+    const WHY: &str = "Anza does not publish this one. It is common operator practice: without \
+        noatime the kernel writes an access timestamp every time the validator reads a file, \
+        which on an accounts database means a metadata write behind a large share of reads. It \
+        costs write endurance for information nothing uses. Worth doing, not required.";
     const EXPECTED: &str = "noatime on the validator's filesystems";
 
     if let Some(o) = needs_linux(ctx, WHY) {

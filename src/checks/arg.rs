@@ -476,10 +476,13 @@ pub fn deprecated_poh_flag(ctx: &Ctx) -> Outcome {
 
 /// PF-ARG-0008.
 pub fn deprecated_accounts_db(ctx: &Ctx) -> Outcome {
-    const WHY: &str = "Deprecated across v4.1 and v4.2. They still parse, so the node starts, \
-        but --accounts-db-access-storages-method is a no-op since v4.2 because mmap mode was \
-        removed entirely: an operator who set it believes they chose a storage access mode and \
-        did not.";
+    const WHY: &str = "Deprecated across v4.1 and v4.2. They still parse, so the node starts and \
+        nothing looks wrong, but a deprecated flag no longer necessarily does what its name says.";
+    const WHY_CACHE: &str = " --accounts-db-cache-limit-mb is superseded by \
+        --accounts-db-write-cache-limit, so the size you set here is not the one in effect.";
+    const WHY_NOOP: &str = " --accounts-db-access-storages-method is a no-op since v4.2, because \
+        mmap mode was removed entirely: whoever set it believes they chose a storage access mode \
+        and did not.";
     const EXPECTED: &str = "none of the deprecated accounts-db arguments";
 
     let inv = gate!(ctx, 4, 1, WHY);
@@ -496,7 +499,18 @@ pub fn deprecated_accounts_db(ctx: &Ctx) -> Outcome {
             other => format!("remove {other}"),
         })
         .collect();
-    deprecated(ctx, found, EXPECTED, WHY, changes)
+
+    // Explain the flags that actually fired, not the whole family. Describing a
+    // flag the operator does not have reads as a bug in the tool.
+    let mut why = WHY.to_string();
+    let has = |f: &str| found.iter().any(|x| x == f);
+    if has("--accounts-db-cache-limit-mb") {
+        why.push_str(WHY_CACHE);
+    }
+    if has("--accounts-db-access-storages-method") {
+        why.push_str(WHY_NOOP);
+    }
+    deprecated(ctx, found, EXPECTED, &why, changes)
 }
 
 /// PF-ARG-0009. Reported as a deprecation on released channels. The behaviour

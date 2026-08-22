@@ -244,6 +244,18 @@ pub fn invocation(name: &str, body: &str) -> PathBuf {
     path
 }
 
+/// Just one finding's block, ending where the next one starts.
+fn block_for<'a>(output: &'a str, id: &str) -> &'a str {
+    let after = match output.split_once(id) {
+        Some((_, rest)) => rest,
+        None => return "",
+    };
+    match after.find("\n  PF-") {
+        Some(end) => &after[..end],
+        None => after,
+    }
+}
+
 fn host(h: &Host) -> String {
     build(h).display().to_string()
 }
@@ -1304,4 +1316,29 @@ fn noatime_is_not_cited_to_anza() {
         "Anza does not publish noatime:\n{cited}"
     );
     assert!(block.contains("Anza does not publish this one"), "{block}");
+}
+
+/// Core count is not the metric. The community list carries 16 core parts that
+/// out-hash 32 core parts, so the check must cite that rather than imply more
+/// cores is better.
+#[test]
+fn core_count_check_cites_the_community_list() {
+    let (o, _) = run(&["--root", &host(&FRESH_UBUNTU), "--profile", "testnet", "-v"]);
+    let block = block_for(&o, "PF-HW-0004");
+    assert!(block.contains("solanahcl.org"), "{block}");
+    assert!(block.contains("16 core"), "{block}");
+    assert!(
+        !block.contains("FAIL"),
+        "no published minimum means no failure:\n{block}"
+    );
+}
+
+/// Nobody publishes a memory minimum, Anza or the community list, so preflight
+/// must not imply the 512 GB board suggestion is a testnet requirement.
+#[test]
+fn memory_check_does_not_present_512gb_as_required() {
+    let (o, _) = run(&["--root", &host(&FRESH_UBUNTU), "--profile", "testnet", "-v"]);
+    let block = block_for(&o, "PF-HW-0005");
+    assert!(block.contains("no published minimum"), "{block}");
+    assert!(block.contains("testnet runs on far less"), "{block}");
 }

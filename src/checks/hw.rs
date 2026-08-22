@@ -249,3 +249,82 @@ pub fn on_recommended_list(ctx: &Ctx) -> Outcome {
         (None, _) => Outcome::reported(format!("{model} is not on the list"), EXPECTED).why(WHY),
     }
 }
+
+/// Ubuntu LTS standard support end dates, as published on the release cycle
+/// page. Only the releases a validator is plausibly running.
+const UBUNTU_EOL: &[(&str, u32, u32)] = &[
+    ("18.04", 2023, 5),
+    ("20.04", 2025, 5),
+    ("22.04", 2027, 6),
+    ("24.04", 2029, 6),
+];
+
+pub const S_RELEASE: &[Source] = &[Source {
+    kind: Operator,
+    locator: "ubuntu.com/about/release-cycle",
+    verified_against: "2026-08",
+    provisional: false,
+}];
+
+/// PF-HW-0007. Whether the distribution still gets kernels.
+///
+/// Sits here rather than with the kernel values because it explains them: an
+/// old release is usually why a kernel is old, and why moving off it is a
+/// bigger job than an upgrade command.
+pub fn os_support(ctx: &Ctx) -> Outcome {
+    const WHY: &str = "A release past standard support stops getting kernel updates, which is \
+        usually why a validator host is several kernel versions behind and why catching up means \
+        a release upgrade rather than apt. Worth knowing before you plan the work, not a reason \
+        the node will stop.";
+    const EXPECTED: &str = "a release still in standard support";
+
+    if let Some(o) = needs_linux(ctx, WHY) {
+        return o;
+    }
+    let Ok(text) = ctx.fs.read("/etc/os-release") else {
+        return Outcome::unknown("cannot read /etc/os-release").why(WHY);
+    };
+    let field = |k: &str| {
+        text.lines()
+            .find_map(|l| l.strip_prefix(k))
+            .map(|v| v.trim_matches('"').to_string())
+    };
+    let (Some(id), Some(version)) = (field("ID="), field("VERSION_ID=")) else {
+        return Outcome::unknown("no release id in /etc/os-release").why(WHY);
+    };
+    let pretty = ctx.os.clone().unwrap_or_else(|| format!("{id} {version}"));
+
+    if id != "ubuntu" {
+        return Outcome::reported(
+            format!("{pretty}, no support dates recorded here"),
+            EXPECTED,
+        )
+        .why(WHY);
+    }
+    let Some((_, year, month)) = UBUNTU_EOL.iter().find(|(v, _, _)| *v == version) else {
+        return Outcome::reported(format!("{pretty}, not a release listed here"), EXPECTED)
+            .why(WHY);
+    };
+
+    let now = crate::host::now_utc();
+    let (this_year, this_month) = (
+        now[..4].parse::<u32>().unwrap_or(*year),
+        now[5..7].parse::<u32>().unwrap_or(*month),
+    );
+    match (this_year, this_month) < (*year, *month) {
+        true => Outcome::pass(
+            format!("{pretty}, supported until {year}-{month:02}"),
+            EXPECTED,
+        )
+        .why(WHY),
+        false => Outcome::fail(
+            format!("{pretty}, standard support ended {year}-{month:02}"),
+            EXPECTED,
+        )
+        .why(WHY)
+        .fix(vec![FixStep::noted(
+            "plan a release upgrade, or move to a host on a supported release",
+            "extended maintenance may still deliver security fixes, but not new kernels",
+        )]),
+    }
+}

@@ -102,7 +102,7 @@ impl Layer {
         match self {
             Layer::Arg => "Validator command line",
             Layer::Xdp => "XDP networking",
-            Layer::Hw => "Hardware",
+            Layer::Hw => "Hardware and OS",
             Layer::Kernel => "Kernel settings",
             Layer::Limits => "Process limits",
             Layer::Fs => "Disks and filesystems",

@@ -125,6 +125,50 @@ impl Layer {
     }
 }
 
+/// What a profile is judged against.
+///
+/// Anza publishes one set of figures and never says which cluster they are for.
+/// They describe a production node, so preflight treats them as the mainnet
+/// baseline. Nobody publishes testnet figures at all, so testnet is judged on
+/// headroom, which is the thing that actually bites, rather than on a size
+/// somebody made up.
+pub struct Thresholds {
+    pub accounts_gb: Option<f64>,
+    pub ledger_gb: Option<f64>,
+    pub snapshots_gb: Option<f64>,
+    /// Fraction of a filesystem that should still be free, on any cluster.
+    pub min_free: f64,
+    pub base_clock_mhz: Option<f64>,
+}
+
+impl Profile {
+    pub fn thresholds(self) -> Thresholds {
+        match self {
+            Profile::Mainnet => Thresholds {
+                accounts_gb: Some(1000.0),
+                ledger_gb: Some(1000.0),
+                snapshots_gb: Some(500.0),
+                min_free: 0.15,
+                base_clock_mhz: Some(2800.0),
+            },
+            Profile::Testnet => Thresholds {
+                accounts_gb: None,
+                ledger_gb: None,
+                snapshots_gb: None,
+                min_free: 0.10,
+                base_clock_mhz: Some(2800.0),
+            },
+            Profile::Local => Thresholds {
+                accounts_gb: None,
+                ledger_gb: None,
+                snapshots_gb: None,
+                min_free: 0.05,
+                base_clock_mhz: None,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Phase {

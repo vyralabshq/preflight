@@ -244,6 +244,12 @@ pub fn invocation(name: &str, body: &str) -> PathBuf {
     path
 }
 
+/// Report text with wrapping collapsed, so an assertion can quote a sentence
+/// without caring where the renderer broke the line.
+fn flat(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Just one finding's block, ending where the next one starts.
 fn block_for<'a>(output: &'a str, id: &str) -> &'a str {
     let after = match output.split_once(id) {
@@ -916,8 +922,8 @@ fn a_fresh_linux_box_gets_a_real_answer() {
 /// Anza specifies, and preflight must say so with no validator present.
 #[test]
 fn a_bare_box_is_told_its_storage_is_too_small() {
-    let (o, _) = run(&["--root", &host(&FRESH_UBUNTU), "--profile", "testnet"]);
-    let block = o.split("PF-FS-0001").nth(1).unwrap_or_default();
+    let (o, _) = run(&["--root", &host(&FRESH_UBUNTU), "--profile", "mainnet"]);
+    let block = block_for(&o, "PF-FS-0001");
     assert!(block.contains("FAIL"), "{block}");
     assert!(block.contains("500 GB across 1 solid-state"), "{block}");
     assert!(
@@ -1237,24 +1243,6 @@ fn memory_is_reported_not_failed() {
     );
 }
 
-/// Anza's page carries one set of figures with no cluster attached, so a
-/// testnet box must not be failed against them as though they were a rule.
-#[test]
-fn storage_figures_are_reported_not_treated_as_a_testnet_rule() {
-    let (o, _) = run(&["--root", &host(&FRESH_UBUNTU), "--profile", "testnet"]);
-    let block = o.split("PF-FS-0001").nth(1).unwrap_or_default();
-    let head: String = block.lines().take(2).collect::<Vec<_>>().join(" ");
-    assert!(
-        head.contains("degraded"),
-        "not fatal on an unlabelled figure: {head}"
-    );
-    assert!(block.contains("does not say which cluster"), "{block}");
-    assert!(
-        !o.contains("PF-FS-0001,"),
-        "must not be listed among startup blockers:\n{o}"
-    );
-}
-
 /// Anza cautions about accounts and ledger sharing a disk. It says nothing
 /// about snapshots, which operators deliberately keep beside the ledger.
 #[test]
@@ -1341,4 +1329,48 @@ fn memory_check_does_not_present_512gb_as_required() {
     let block = block_for(&o, "PF-HW-0005");
     assert!(block.contains("no published minimum"), "{block}");
     assert!(block.contains("testnet runs on far less"), "{block}");
+}
+
+/// The profile has to change what a check demands, not just which checks run.
+/// Anza's figures describe a production node, so they apply to mainnet. Nobody
+/// publishes testnet figures, so testnet is judged on headroom instead.
+#[test]
+fn storage_thresholds_follow_the_profile() {
+    let small = Host {
+        name: "one-small-disk",
+        disks: &[("sda", 500, false)],
+        ..FRESH_UBUNTU
+    };
+    let root = host(&small);
+
+    let (mainnet, _) = run(&["--root", &root, "--profile", "mainnet"]);
+    assert!(
+        mainnet.contains("PF-FS-0001"),
+        "500 GB is short for mainnet:\n{mainnet}"
+    );
+    assert!(
+        flat(block_for(&mainnet, "PF-FS-0001")).contains("preflight applies them to mainnet"),
+        "{mainnet}"
+    );
+
+    let (testnet, _) = run(&["--root", &root, "--profile", "testnet", "-v"]);
+    let block = block_for(&testnet, "PF-FS-0001");
+    assert!(
+        block.contains("PASS"),
+        "the same box must not fail on testnet:\n{block}"
+    );
+    assert!(
+        flat(block).contains("does not judge you against a size"),
+        "{block}"
+    );
+}
+
+#[test]
+fn base_clock_is_not_demanded_of_a_local_validator() {
+    let (o, _) = run(&["--root", &host(&FRESH_UBUNTU), "--profile", "local", "-v"]);
+    let block = block_for(&o, "PF-HW-0003");
+    assert!(
+        block.is_empty() || block.contains("SKIPPED"),
+        "a test validator has no clock requirement:\n{block}"
+    );
 }

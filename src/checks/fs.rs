@@ -502,10 +502,10 @@ pub const S_RETENTION: &[Source] = &[Source {
 /// aimed at more disk than exists is a future outage with a stated mechanism.
 pub fn retention_fits_disk(ctx: &Ctx) -> Outcome {
     const WHY: &str = "Agave sizes the blockstore in shreds and approximates a shred at 1250 \
-        bytes, so a retention target converts to a disk footprint. The default aims at 500 GB, \
-        which the source says in as many words. If that target is larger than the filesystem \
-        holding the ledger, the node does not fail today: it fills the disk on its way to a size \
-        it was told to reach, and the failure arrives weeks later with no warning attached to it.";
+        bytes, so a retention target converts to a disk footprint. What preflight cannot see is \
+        how much of that target is already on disk: a store at 475 GB of a 500 GB target needs \
+        25 GB more, not 500. Free space alone would call that a shortfall and be wrong, so this \
+        reports the two numbers and the command that closes the gap.";
     const EXPECTED: &str = "a retention target the ledger's filesystem can hold";
 
     if let Some(o) = needs_linux(ctx, WHY) {
@@ -518,17 +518,34 @@ pub fn retention_fits_disk(ctx: &Ctx) -> Outcome {
         return Outcome::skipped("no --ledger path in the invocation");
     };
 
-    // Total shreds either way: the legacy flag counts data only, and agave
-    // assumes a 1:1 data to coding ratio, so the budget is twice the number.
-    let total_shreds = match (
+    // Derive from the flag actually in use. Under the legacy flag the budget
+    // counts data shreds only, so the footprint is an estimate at a 1:1 erasure
+    // ratio rather than a bound, and it drifts up when the cluster gets strange.
+    let (total_shreds, constant, bounded) = match (
         inv.value("--limit-blockstore-size"),
         inv.has("--limit-ledger-size"),
         inv.value("--limit-ledger-size"),
     ) {
-        (Some(v), ..) => v.parse::<f64>().unwrap_or(DEFAULT_BLOCKSTORE_SHREDS),
-        (None, true, Some(v)) => v.parse::<f64>().unwrap_or(LEGACY_DEFAULT_LEDGER_SHREDS) * 2.0,
-        (None, true, None) => LEGACY_DEFAULT_LEDGER_SHREDS * 2.0,
-        (None, false, _) => DEFAULT_BLOCKSTORE_SHREDS,
+        (Some(v), ..) => (
+            v.parse::<f64>().unwrap_or(DEFAULT_BLOCKSTORE_SHREDS),
+            "your --limit-blockstore-size value",
+            true,
+        ),
+        (None, true, Some(v)) => (
+            v.parse::<f64>().unwrap_or(LEGACY_DEFAULT_LEDGER_SHREDS) * 2.0,
+            "your --limit-ledger-size value, doubled for coding shreds",
+            false,
+        ),
+        (None, true, None) => (
+            LEGACY_DEFAULT_LEDGER_SHREDS * 2.0,
+            "LEGACY_DEFAULT_MAX_LEDGER_SHREDS, doubled for coding shreds",
+            false,
+        ),
+        (None, false, _) => (
+            DEFAULT_BLOCKSTORE_SHREDS,
+            "DEFAULT_MAX_BLOCKSTORE_SHREDS",
+            true,
+        ),
     };
     let target_gb = total_shreds * BYTES_PER_SHRED / 1e9;
 
@@ -543,8 +560,6 @@ pub fn retention_fits_disk(ctx: &Ctx) -> Outcome {
         facts.and_then(|x| x.free_gb),
         facts.and_then(|x| x.total_gb),
     ) else {
-        // Under --root the numbers would describe the machine running preflight,
-        // so this is out of scope rather than a failed probe.
         return match ctx.fs.is_prefixed() {
             true => Outcome::skipped("free space cannot be read from a captured tree"),
             false => Outcome::unknown(format!("free space on {} not measured", m.target))
@@ -553,43 +568,65 @@ pub fn retention_fits_disk(ctx: &Ctx) -> Outcome {
         };
     };
 
+    let bound_note = match bounded {
+        true => String::new(),
+        false => format!(
+            " That figure comes from {constant}, which counts data shreds only, so it is an \
+             estimate at a 1:1 erasure ratio and not a bound. Moving to \
+             --limit-blockstore-size is what makes it one."
+        ),
+    };
+    let verify = format!("du -sh {ledger}/rocksdb");
     let observed = format!(
-        "retention targets about {target_gb:.0} GB; {} has {free:.0} GB free of {total:.0} GB",
+        "retention targets about {target_gb:.0} GB from {constant}; {} has {free:.0} GB free of \
+         {total:.0} GB",
         m.target
     );
-    let expected = format!("a target at or under what {} can hold", m.target);
-    let verify = format!("du -sh {ledger}/rocksdb");
 
-    // Some of the target may already be on disk, so free space alone
-    // understates capacity. Total does not.
+    // Larger than the whole filesystem can never be met, whatever is on disk.
     if target_gb > total {
-        return Outcome::fail(observed, expected)
-            .why(format!(
-                "{WHY} This target is larger than the whole filesystem, so it can never be met."
-            ))
-            .fix(retention_fix(ctx, target_gb, total))
+        return Outcome::fail(observed, format!("a target at or under {} total", m.target))
+            .why(format!("{WHY}{bound_note}"))
+            .fix(retention_fix(ctx, target_gb, total, bounded))
             .verify(verify);
     }
-    if target_gb > free {
-        return Outcome::fail(observed, expected)
-            .why(format!(
-                "{WHY} Part of that target may already be on disk, which free space alone does \
-                 not show, so check the current size before deciding how much room is left."
-            ))
-            .fix(retention_fix(ctx, target_gb, free))
-            .verify(verify);
-    }
-    Outcome::pass(observed, expected).why(WHY).verify(verify)
+
+    // Otherwise preflight cannot decide without knowing current usage, and
+    // guessing from free space alone produces a false alarm on a store that is
+    // already near its cap and about to stop growing.
+    Outcome::reported(
+        observed,
+        format!("run {verify} to see how much of that target is already there"),
+    )
+    .why(format!(
+        "{WHY}{bound_note} If that number plus {free:.0} GB free is comfortably under \
+         {target_gb:.0} GB, the store is still filling and will plateau. If it is not, size the \
+         retention to the disk or move a path to another device."
+    ))
+    .fix(retention_fix(ctx, target_gb, free, bounded))
+    .verify(verify)
 }
 
 /// Both ways out, including the one that uses hardware already paid for.
-fn retention_fix(ctx: &Ctx, target_gb: f64, room_gb: f64) -> Vec<FixStep> {
-    let shreds = (room_gb * 0.8 * 1e9 / BYTES_PER_SHRED) as u64;
+/// Round hard: the inputs are a 1250-byte approximation and an 80% rule of
+/// thumb, and nine significant figures would imply a measurement nobody made.
+fn sized_shreds(room_gb: f64) -> f64 {
+    (room_gb * 0.8 * 1e9 / BYTES_PER_SHRED / 10e6).round() * 10e6
+}
+
+fn retention_fix(ctx: &Ctx, target_gb: f64, room_gb: f64, bounded: bool) -> Vec<FixStep> {
+    let shreds = sized_shreds(room_gb);
+    // Both this and PF-ARG-0011 edit the same line. Working the list top to
+    // bottom must not leave an operator holding both flags at once.
+    let lead = match bounded {
+        true => "if you shrink it: ",
+        false => "if you shrink it, on the flag PF-ARG-0011 renames to: ",
+    };
     let mut steps = vec![FixStep::noted(
-        format!("--limit-blockstore-size {shreds}"),
+        format!("{lead}--limit-blockstore-size {shreds:.0}"),
         format!(
-            "sized to about 80% of the {room_gb:.0} GB available rather than the {target_gb:.0} \
-             GB default"
+            "about 80% of the {room_gb:.0} GB free, against a {target_gb:.0} GB target. Subtract \
+             what du reports before trusting it"
         ),
     )];
 
@@ -617,4 +654,24 @@ fn retention_fix(ctx: &Ctx, target_gb: f64, room_gb: f64) -> Vec<FixStep> {
         ));
     }
     steps
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A store at 475 GB of a 500 GB target needs 25 GB more, not 500, so free
+    /// space alone must never decide this. The only fail is a target larger than
+    /// the whole filesystem, which no amount of cleanup can meet.
+    #[test]
+    fn sizing_is_rounded_to_what_the_inputs_support() {
+        // 235 GB free once produced 150218434, which reads as a measurement.
+        assert_eq!(sized_shreds(235.0), 150_000_000.0);
+        assert_eq!(sized_shreds(905.0), 580_000_000.0);
+        // The legacy flag counts data shreds only, so the footprint doubles.
+        assert_eq!(
+            LEGACY_DEFAULT_LEDGER_SHREDS * 2.0,
+            DEFAULT_BLOCKSTORE_SHREDS
+        );
+    }
 }

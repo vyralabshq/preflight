@@ -186,7 +186,7 @@ pub static CHECKS: &[Check] = &[
         id: "PF-KRN-0005",
         layer: Layer::Kernel,
         severity: Degraded,
-        title: "Kernel is new enough for the XDP transmit path",
+        title: "Kernel carries the XDP mode the invocation asks for",
         profiles: &[Testnet, Mainnet],
         clients: AGAVE,
         needs_root: false,

@@ -23,7 +23,7 @@ pub const S_LIMITS: &[Source] = &[
 ];
 pub const S_XDP_KERNEL: &[Source] = &[Source {
     kind: AnzaBlog,
-    locator: "anza.xyz/blog/agave-xdp-setup-guide",
+    locator: "anza.xyz/blog/agave-xdp-setup-guide, zero copy kernel versions",
     verified_against: "2026-08",
     provisional: false,
 }];
@@ -196,6 +196,9 @@ pub fn nr_open(ctx: &Ctx) -> Outcome {
 /// Anza's floor for the XDP transmit path, by driver.
 const KERNEL_FLOOR: (u32, u32) = (6, 8);
 const KERNEL_FLOOR_IGB: (u32, u32) = (6, 14);
+/// AF_XDP landed in 4.18, which is what the default copy-mode path needs. The
+/// figures above are Anza's zero copy numbers and do not apply to it.
+const AF_XDP_FLOOR: (u32, u32) = (4, 18);
 
 fn kernel_version(ctx: &Ctx) -> Option<(u32, u32)> {
     let raw = ctx.fs.read_trim("/proc/sys/kernel/osrelease")?;
@@ -208,10 +211,11 @@ fn kernel_version(ctx: &Ctx) -> Option<(u32, u32)> {
 ///
 /// The floor depends on the driver, so this reads the card before deciding.
 pub fn xdp_floor(ctx: &Ctx) -> Outcome {
-    const WHY: &str = "XDP transmit is on by default on Linux since v4.2, and Anza's setup guide \
-        gives a kernel floor for it: 6.14 when the driver is igb, 6.8 otherwise. Below that the \
-        path is either unavailable or unreliable, and the node quietly falls back or misbehaves \
-        rather than refusing to start, so nothing tells you.";
+    const WHY: &str = "Anza's setup guide gives kernel versions for XDP zero copy: 6.14 when the \
+        driver is igb, 6.8 otherwise, and it says recommended rather than required. Agave turns \
+        XDP on by default from v4.2, but without zero copy, because some NIC drivers do not \
+        support it reliably. So the default path is copy mode, which needs AF_XDP and not those \
+        versions, and the guide's numbers only bind when zero copy is actually asked for.";
 
     if ctx.client == ClientKind::Firedancer {
         return Outcome::skipped("Firedancer manages its own AF_XDP setup");
@@ -219,60 +223,91 @@ pub fn xdp_floor(ctx: &Ctx) -> Outcome {
     let Some(inv) = ctx.inv() else {
         return Outcome::skipped("no validator yet, so no XDP path to judge the kernel against");
     };
-    let disabled = inv.has("--no-xdp");
-    let explicit = ["--xdp-interface", "--xdp-cpu-cores", "--xdp-zero-copy"]
+    if inv.has("--no-xdp") {
+        return Outcome::skipped("--no-xdp is set, so no kernel floor applies");
+    }
+    let zero_copy = inv.has("--xdp-zero-copy");
+    let explicit = ["--xdp-interface", "--xdp-cpu-cores"]
         .iter()
-        .any(|f| inv.has(f));
-    let default_on = ctx.at_least(4, 2);
-    if disabled || !(explicit || default_on) {
+        .any(|f| inv.has(f))
+        || zero_copy;
+    if !(explicit || ctx.at_least(4, 2)) {
         return Outcome::skipped("XDP not in use, so no kernel floor applies");
     }
     let Some((major, minor)) = kernel_version(ctx) else {
         return Outcome::unknown("cannot read the kernel version").why(WHY);
     };
-
-    let driver = crate::checks::net::primary_interface(ctx)
-        .and_then(|iface| crate::checks::net::driver_of(ctx, &iface));
-    let (floor, because) = match driver.as_deref() {
-        Some("igb") => (KERNEL_FLOOR_IGB, " because the driver is igb"),
-        _ => (KERNEL_FLOOR, ""),
-    };
-    let expected = format!("kernel {}.{} or newer{because}", floor.0, floor.1);
     let observed = format!("kernel {major}.{minor}");
 
+    // Copy mode is the default and the guide's versions are not about it, so
+    // asking for a 6.8 kernel here would be preflight inventing a requirement.
+    if !zero_copy {
+        let expected = format!(
+            "kernel {}.{} or newer for AF_XDP in copy mode",
+            AF_XDP_FLOOR.0, AF_XDP_FLOOR.1
+        );
+        if (major, minor) < AF_XDP_FLOOR {
+            return Outcome::fail(observed, expected).why(WHY).fix(vec![
+                FixStep::noted(
+                    "--no-xdp",
+                    "the immediate action, back to UDP sockets today",
+                ),
+                FixStep::cmd(format!(
+                    "then upgrade the kernel to {}.{} or newer",
+                    AF_XDP_FLOOR.0, AF_XDP_FLOOR.1
+                )),
+            ]);
+        }
+        let floor = match driver_floor(ctx).0 {
+            f if (major, minor) >= f => return Outcome::pass(observed, expected).why(WHY),
+            f => f,
+        };
+        // Above AF_XDP, below Anza's zero copy number. Nothing is wrong today,
+        // and the only thing the operator cannot do is turn zero copy on.
+        return Outcome::reported(
+            format!("{observed}, which carries XDP in copy mode but not zero copy"),
+            format!(
+                "no requirement unmet; zero copy would want {}.{} and is not in use",
+                floor.0, floor.1
+            ),
+        )
+        .why(WHY);
+    }
+
+    let (floor, because) = driver_floor(ctx);
+    let expected = format!(
+        "kernel {}.{} or newer for zero copy{because}",
+        floor.0, floor.1
+    );
     if (major, minor) >= floor {
         return Outcome::pass(observed, expected).why(WHY);
     }
-
-    // Below the floor with XDP merely available is a shortfall. Below the floor
-    // with XDP on by default and no --no-xdp means the default path is live on
-    // a kernel that cannot carry it, with nothing to fall back to.
-    let unguarded = default_on && !explicit;
-    let why = match unguarded {
-        true => format!(
-            "{WHY} On this box XDP is on by default, the kernel is below the floor, and the \
-             invocation does not pass --no-xdp, so that path is live with no fallback."
+    Outcome::fail(
+        format!("{observed}, with --xdp-zero-copy requested"),
+        expected,
+    )
+    .why(format!(
+        "{WHY} This invocation asks for zero copy on a kernel below the version the guide gives \
+         for it."
+    ))
+    .fix(vec![
+        FixStep::noted(
+            "drop --xdp-zero-copy",
+            "copy mode is the default for a reason and stays available on this kernel",
         ),
-        false => WHY.to_string(),
-    };
-    let fix = match unguarded {
-        true => vec![
-            FixStep::noted(
-                "--no-xdp",
-                "the immediate action: it puts the node back on UDP sockets today",
-            ),
-            FixStep::noted(
-                format!(
-                    "then upgrade the kernel to {}.{} or newer",
-                    floor.0, floor.1
-                ),
-                "the real fix, and on an older distribution that may mean a release upgrade",
-            ),
-        ],
-        false => vec![FixStep::cmd(format!(
-            "upgrade the kernel to {}.{} or newer",
-            floor.0, floor.1
-        ))],
-    };
-    Outcome::fail(observed, expected).why(why).fix(fix)
+        FixStep::noted(
+            format!("or upgrade the kernel to {}.{} or newer", floor.0, floor.1),
+            "on an older distribution that may mean a release upgrade",
+        ),
+    ])
+}
+
+/// The zero copy figure depends on the card, so this reads the driver first.
+fn driver_floor(ctx: &Ctx) -> ((u32, u32), &'static str) {
+    let driver = crate::checks::net::primary_interface(ctx)
+        .and_then(|iface| crate::checks::net::driver_of(ctx, &iface));
+    match driver.as_deref() {
+        Some("igb") => (KERNEL_FLOOR_IGB, " because the driver is igb"),
+        _ => (KERNEL_FLOOR, ""),
+    }
 }

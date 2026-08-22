@@ -1457,21 +1457,75 @@ fn passing_checks_are_named_not_just_counted() {
     assert!(!verbose.contains("checked and fine"), "{verbose}");
 }
 
-/// XDP is on by default since v4.2 and Anza gives a kernel floor for it. A box
-/// three minor versions below that floor was reported as entirely fine.
+/// Anza's 6.8 and 6.14 are zero copy numbers, and agave's default is XDP
+/// without zero copy. Applying them to the default path invented a requirement
+/// and failed a box whose own logs showed the path working.
 #[test]
-fn an_old_kernel_under_xdp_is_reported() {
+fn the_zero_copy_floor_does_not_bind_the_default_path() {
     let old = Host {
         name: "old-kernel",
         kernel: "5.15.0-139-generic",
         nic: Some(("eth0", "bnxt_en")),
         ..WRAPPER_SCRIPT_UNIT
     };
-    let (o, _) = run(&["--root", &host(&old), "--client", "agave-validator@4.3.0"]);
+    let (o, code) = run(&[
+        "--root",
+        &host(&old),
+        "--client",
+        "agave-validator@4.3.0",
+        "-v",
+    ]);
+    let block = block_for(&o, "PF-KRN-0005");
+    assert!(
+        !block.contains("FAIL"),
+        "copy mode on 5.15 is not a shortfall:\n{block}"
+    );
+    assert!(flat(block).contains("copy mode"), "{block}");
+    assert!(
+        flat(block).contains("recommended"),
+        "the guide says recommended, and so must this:\n{block}"
+    );
+    assert!(
+        !flat(&o).contains("PF-KRN-0005") || !block.contains("FAIL"),
+        "the kernel must not be what makes this box fail:\n{block}"
+    );
+    let _ = code;
+}
+
+/// Asking for zero copy is what makes the guide's numbers bind.
+#[test]
+fn zero_copy_below_the_floor_is_a_finding() {
+    let zc = Host {
+        name: "zero-copy-old-kernel",
+        kernel: "5.15.0-139-generic",
+        nic: Some(("eth0", "bnxt_en")),
+        files: &[
+            (
+                "/etc/systemd/system/sol.service",
+                "[Service]\nUser=sol\nExecStart=/home/sol/bin/validator.sh\n",
+            ),
+            (
+                "/home/sol/bin/validator.sh",
+                "#!/usr/bin/env bash\nexec agave-validator \\\n\
+             --identity /home/sol/validator-keypair.json \\\n\
+             --vote-account /home/sol/vote-account-keypair.json \\\n\
+             --entrypoint entrypoint.testnet.solana.com:8001 \\\n\
+             --ledger /mnt/ledger \\\n\
+             --accounts /mnt/accounts \\\n\
+             --xdp-zero-copy \\\n\
+             --dynamic-port-range 8000-8020\n",
+            ),
+        ],
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let (o, _) = run(&["--root", &host(&zc), "--client", "agave-validator@4.3.0"]);
     let block = block_for(&o, "PF-KRN-0005");
     assert!(block.contains("FAIL"), "{block}");
-    assert!(flat(block).contains("kernel 5.15"), "{block}");
-    assert!(flat(block).contains("kernel 6.8 or newer"), "{block}");
+    assert!(flat(block).contains("6.8"), "{block}");
+    assert!(
+        flat(block).contains("drop --xdp-zero-copy"),
+        "dropping the flag is the cheap way out, not a release upgrade:\n{block}"
+    );
 }
 
 /// igb needs a newer kernel than everything else, so the floor reads the card.
@@ -1481,6 +1535,23 @@ fn the_kernel_floor_follows_the_driver() {
         name: "igb-nic",
         kernel: "6.10.0-generic",
         nic: Some(("eth0", "igb")),
+        files: &[
+            (
+                "/etc/systemd/system/sol.service",
+                "[Service]\nUser=sol\nExecStart=/home/sol/bin/validator.sh\n",
+            ),
+            (
+                "/home/sol/bin/validator.sh",
+                "#!/usr/bin/env bash\nexec agave-validator \\\n\
+             --identity /home/sol/validator-keypair.json \\\n\
+             --vote-account /home/sol/vote-account-keypair.json \\\n\
+             --entrypoint entrypoint.testnet.solana.com:8001 \\\n\
+             --ledger /mnt/ledger \\\n\
+             --accounts /mnt/accounts \\\n\
+             --xdp-zero-copy \\\n\
+             --dynamic-port-range 8000-8020\n",
+            ),
+        ],
         ..WRAPPER_SCRIPT_UNIT
     };
     let (o, _) = run(&["--root", &host(&igb), "--client", "agave-validator@4.3.0"]);
@@ -1631,24 +1702,6 @@ fn the_kernel_floor_belongs_to_the_machine_question() {
     assert!(
         machine.contains("requirement"),
         "the verdict must say no:\n{machine}"
-    );
-}
-
-/// Default-on XDP below the floor with no --no-xdp is not a tuning shortfall,
-/// and the fix leads with the action that helps today.
-#[test]
-fn an_unguarded_xdp_path_leads_with_the_fallback() {
-    let old = Host {
-        name: "unguarded-xdp",
-        kernel: "5.15.0-139-generic",
-        ..WRAPPER_SCRIPT_UNIT
-    };
-    let (o, _) = run(&["--root", &host(&old), "--client", "agave-validator@4.3.0"]);
-    let block = block_for(&o, "PF-KRN-0005");
-    assert!(flat(block).contains("live with no fallback"), "{block}");
-    assert!(
-        flat(block).contains("fix --no-xdp"),
-        "the fallback comes first:\n{block}"
     );
 }
 

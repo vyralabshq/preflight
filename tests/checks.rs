@@ -1374,3 +1374,30 @@ fn base_clock_is_not_demanded_of_a_local_validator() {
         "a test validator has no clock requirement:\n{block}"
     );
 }
+
+/// The verdict names a cluster, so the report must say where that came from.
+/// Inferring silently leaves an operator wondering which figures were applied.
+#[test]
+fn the_report_says_which_profile_it_inferred_and_why() {
+    let (o, _) = run(&[
+        "--root",
+        &host(&WRAPPER_SCRIPT_UNIT),
+        "--client",
+        "agave-validator@4.2.1",
+    ]);
+    assert!(o.contains("profile     testnet"), "{o}");
+    assert!(
+        o.contains("entrypoint entrypoint.testnet.solana.com"),
+        "{o}"
+    );
+
+    let (forced, _) = run(&[
+        "--root",
+        &host(&WRAPPER_SCRIPT_UNIT),
+        "--client",
+        "agave-validator@4.2.1",
+        "--profile",
+        "mainnet",
+    ]);
+    assert!(forced.contains("set with --profile"), "{forced}");
+}

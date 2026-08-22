@@ -88,12 +88,20 @@ pub const S_DIO: &[Source] = &[Source {
     verified_against: "v4.2.1",
     provisional: false,
 }];
-pub const S_43_LEDGER: &[Source] = &[Source {
-    kind: AgaveSymbol,
-    locator: "--limit-blockstore-size, present in agave-validator --help",
-    verified_against: "4.3.0-beta.0",
-    provisional: false,
-}];
+pub const S_43_LEDGER: &[Source] = &[
+    Source {
+        kind: AgaveSymbol,
+        locator: "BlockstoreCleanupStrategy, CountDataShreds vs CountDataAndCodingShreds",
+        verified_against: "agave master",
+        provisional: false,
+    },
+    Source {
+        kind: AgaveSymbol,
+        locator: "--limit-blockstore-size, present in agave-validator --help",
+        verified_against: "4.3.0-beta.0",
+        provisional: false,
+    },
+];
 pub const S_43_TRACE: &[Source] = &[Source {
     kind: AgaveChangelog,
     locator: "4.3.0-Unreleased Validator/Deprecations",
@@ -605,10 +613,14 @@ pub fn direct_io(ctx: &Ctx) -> Outcome {
 /// --limit-blockstore-size in its help. The changelog said so; the binary
 /// settles it.
 pub fn limit_ledger_size(ctx: &Ctx) -> Outcome {
-    const WHY: &str = "Deprecated in favour of --limit-blockstore-size, which counts more \
-        precisely. A non-default value does not carry across directly: doubling it is the \
-        documented starting point, and the new flag may use more disk at steady state while \
-        being more stable during abnormal cluster activity.";
+    const WHY: &str = "The two flags count different things. BlockstoreCleanupStrategy has one \
+        variant per flag: CountDataShreds for --limit-ledger-size, CountDataAndCodingShreds for \
+        --limit-blockstore-size. Turbine erasure-codes every block, so the store holds coding \
+        shreds alongside the data ones and both take real disk. The old flag counted only the \
+        data half, so the store held roughly twice whatever you set, and the multiple moved with \
+        the cluster's erasure ratio. The new one counts everything that is actually there, which \
+        is why disk use may read higher at steady state and yet stay steadier when the cluster \
+        gets strange.";
     const EXPECTED: &str = "--limit-blockstore-size";
 
     let inv = gate!(ctx, 4, 3, WHY);
@@ -619,18 +631,26 @@ pub fn limit_ledger_size(ctx: &Ctx) -> Outcome {
     // default the swap is a rename, and telling an operator to double a number
     // they never set would have them invent one.
     match inv.value("--limit-ledger-size") {
-        Some(n) => Outcome::fail(format!("--limit-ledger-size {n}"), EXPECTED)
-            .why(format!(
-                "{WHY} You have set a value, so it does not carry across directly."
-            ))
-            .fix(edit_steps(
-                ctx,
-                format!("--limit-ledger-size {n}   ->   --limit-blockstore-size <about {}>", n.parse::<u64>().map(|v| v * 2).map(|v| v.to_string()).unwrap_or_else(|_| "twice that".into())),
-                Some("doubling is the documented starting point; watch steady-state disk use after the change"),
-            )),
+        Some(n) => {
+            let doubled = n
+                .parse::<u64>()
+                .map(|v| (v * 2).to_string())
+                .unwrap_or_else(|_| "twice that".into());
+            Outcome::fail(format!("--limit-ledger-size {n}"), EXPECTED)
+                .why(format!(
+                    "{WHY} You set {n}, which counted data shreds only, so about {doubled} keeps \
+                     the same history under the flag that counts both."
+                ))
+                .fix(edit_steps(
+                    ctx,
+                    format!("--limit-ledger-size {n}   ->   --limit-blockstore-size {doubled}"),
+                    Some("a starting point, not a conversion; watch steady-state disk use after"),
+                ))
+        }
         None => Outcome::fail("--limit-ledger-size, with no value", EXPECTED)
             .why(format!(
-                "{WHY} You are on the default, so this is a rename with no number to carry."
+                "{WHY} You are on the default, so there is no number to carry across: agave \
+                 applies its own default of 800000 shreds to the new flag."
             ))
             .fix(edit_steps(
                 ctx,

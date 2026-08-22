@@ -1790,3 +1790,28 @@ fn a_flag_with_no_value_is_a_rename_not_a_conversion() {
         "doubled for them:\n{block}"
     );
 }
+
+/// The changelog says "counts more precisely". The source says which variants
+/// do the counting, and that is what an operator needs to decide anything.
+#[test]
+fn the_ledger_size_check_explains_the_mechanism_not_the_changelog() {
+    let bare = invocation(
+        "mechanism.txt",
+        "exec agave-validator --ledger /l --accounts /a --limit-ledger-size\n",
+    );
+    let (o, _) = run(&[
+        "--invocation",
+        bare.to_str().unwrap(),
+        "--client",
+        "agave-validator@4.3.0-beta.0",
+        "--profile",
+        "testnet",
+    ]);
+    let block = block_for(&o, "PF-ARG-0011");
+    assert!(flat(block).contains("CountDataAndCodingShreds"), "{block}");
+    assert!(flat(block).contains("coding shreds"), "{block}");
+    assert!(
+        flat(block).contains("BlockstoreCleanupStrategy"),
+        "the source is a symbol, not a paraphrase:\n{block}"
+    );
+}

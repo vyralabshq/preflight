@@ -18,6 +18,16 @@ pub const S_REQ: &[Source] = &[Source {
     provisional: false,
 }];
 
+/// The community hardware list, which records what operators actually run and
+/// what PoH rate each part reaches. Anza publishes no core or memory minimum,
+/// so this is the closest thing to evidence.
+pub const S_HCL: &[Source] = &[Source {
+    kind: Operator,
+    locator: "solanahcl.org, agave CPU list",
+    verified_against: "2026-08",
+    provisional: false,
+}];
+
 fn cpuinfo(ctx: &Ctx) -> Option<String> {
     ctx.fs.read("/proc/cpuinfo").ok()
 }
@@ -117,11 +127,12 @@ pub fn base_clock(ctx: &Ctx) -> Outcome {
 
 /// PF-HW-0004. Cores. Reported, never failed: Anza publishes no minimum.
 pub fn cores(ctx: &Ctx) -> Outcome {
-    const WHY: &str = "Anza's requirements page gives no core-count minimum. It states only that \
-        higher clock speed is preferable to more cores. preflight reports what this machine has \
-        and refuses to invent a threshold, because a made-up number would either pass a box that \
-        cannot keep up or fail one that can.";
-    const EXPECTED: &str = "no published minimum; reported for your judgement";
+    const WHY: &str = "Core count is not the metric, and the community hardware list shows why: \
+        a 16 core Ryzen 9950X reaches about 23M PoH hashes per second, while a 32 core EPYC 9354P \
+        reaches 14M to 16M. Both are on the recommended list. Proof of History is a sequential \
+        chain, so single core speed decides whether you keep up. Anza publishes no minimum and \
+        preflight will not invent one.";
+    const EXPECTED: &str = "no published minimum; 16 core parts are on the recommended list";
 
     if let Some(o) = needs_linux(ctx, WHY) {
         return o;
@@ -145,12 +156,13 @@ pub fn cores(ctx: &Ctx) -> Outcome {
 /// PF-HW-0005. RAM. Anza suggests a 512 GB-capable board, which is guidance
 /// rather than a floor, so this reports and warns instead of failing.
 pub fn memory(ctx: &Ctx) -> Outcome {
-    const WHY: &str = "Anza suggests a motherboard with 512 GB capacity and ECC memory. That is \
-        a suggestion about the board, not a stated minimum for the process, so preflight reports \
-        what is installed and leaves the judgement to you. Accounts and index live in memory, and \
-        running short shows up as an OOM kill hours into a run rather than at startup, so it is \
-        worth knowing your headroom even though no threshold is published.";
-    const EXPECTED: &str = "512 GB board capacity suggested by Anza; no hard minimum published";
+    const WHY: &str = "Anza suggests a board with 512 GB capacity and ECC memory, without saying \
+        which cluster that is for, and publishes no minimum. Neither does the community hardware \
+        list. Operators run testnet on far less. Accounts and index live in memory, so running \
+        short shows up as an OOM kill hours into a run rather than at startup, which is why the \
+        figure is worth seeing even though nobody will tell you what it should be.";
+    const EXPECTED: &str =
+        "no published minimum; testnet runs on far less than the 512 GB board suggestion";
 
     if let Some(o) = needs_linux(ctx, WHY) {
         return o;

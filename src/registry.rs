@@ -62,7 +62,7 @@ pub static CHECKS: &[Check] = &[
         clients: ANY_CLIENT,
         needs_root: false,
         reports_only: true,
-        source: hw::S_REQ,
+        source: hw::S_HCL,
         run: hw::cores,
     },
     Check {

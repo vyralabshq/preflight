@@ -1547,3 +1547,37 @@ fn the_header_is_enough_to_read_a_pasted_report() {
     assert!(o.contains("run         preflight --root"), "{o}");
     assert!(o.contains("UTC"), "{o}");
 }
+
+/// A box running testnet is a fair thing to judge against mainnet, so the
+/// report says how to ask rather than leaving the flag undiscoverable.
+#[test]
+fn the_report_says_how_to_ask_about_another_cluster() {
+    let (o, _) = run(&[
+        "--root",
+        &host(&WRAPPER_SCRIPT_UNIT),
+        "--client",
+        "agave-validator@4.2.1",
+    ]);
+    assert!(o.contains("preflight --profile mainnet"), "{o}");
+
+    let (mainnet, _) = run(&[
+        "--root",
+        &host(&WRAPPER_SCRIPT_UNIT),
+        "--client",
+        "agave-validator@4.2.1",
+        "--profile",
+        "mainnet",
+    ]);
+    assert!(mainnet.contains("preflight --profile testnet"), "{mainnet}");
+    assert!(
+        !mainnet.contains("--profile mainnet |"),
+        "never offer the current one:\n{mainnet}"
+    );
+}
+
+#[test]
+fn the_run_row_reads_cleanly_with_no_arguments() {
+    let dir = fake_validator("4.2.1");
+    let o = run_with_path(&dir, &["--profile", "testnet"]);
+    assert!(!o.contains("preflight  ·"), "no double space:\n{o}");
+}

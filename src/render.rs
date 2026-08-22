@@ -7,7 +7,7 @@
 use crate::{
     ctx::{Ctx, VersionSource},
     host::REGISTRY_COVERS_THROUGH,
-    model::{Finding, Phase, Status},
+    model::{Finding, Phase, Profile, Status},
     registry::CHECKS,
 };
 use serde::Serialize;
@@ -270,15 +270,11 @@ fn system_report(ctx: &Ctx, st: &Style, needs_root: usize) -> String {
         );
     }
     let args: Vec<String> = std::env::args().skip(1).collect();
-    row!(
-        "run",
-        format!(
-            "preflight {}  ·  {}",
-            args.join(" "),
-            crate::host::now_utc()
-        )
-        .replace("preflight   ", "preflight ")
-    );
+    let invoked = match args.is_empty() {
+        true => "preflight".to_string(),
+        false => format!("preflight {}", args.join(" ")),
+    };
+    row!("run", format!("{invoked}  ·  {}", crate::host::now_utc()));
     row!("preflight", mode);
     format!("{}{}", st.bold("SYSTEM\n"), out.concat())
 }
@@ -497,14 +493,18 @@ fn phase_block(
     };
 
     let mut s = format!("\n{}\n  {}\n", st.bold(question), verdict);
-    if phase == Phase::Machine
-        && !ctx.validator_present
-        && ctx.profile == crate::model::Profile::Local
-    {
-        s.push_str(&st.dim(
-            "  this asks what a test validator needs. for a real voting node:\n\
-             \x20   preflight --profile testnet\n",
-        ));
+    // The answer is about one cluster, so say how to ask about another. A box
+    // running testnet is a fair thing to judge against mainnet requirements.
+    if phase == Phase::Machine {
+        let others: Vec<&str> = [Profile::Testnet, Profile::Mainnet, Profile::Local]
+            .iter()
+            .filter(|p| **p != ctx.profile)
+            .map(|p| p.label())
+            .collect();
+        s.push_str(&st.dim(&format!(
+            "  to ask the same about another cluster:  preflight --profile {}\n",
+            others.join(" | ")
+        )));
     }
 
     let mut sections: Vec<&'static str> = Vec::new();

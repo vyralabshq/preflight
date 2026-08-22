@@ -290,14 +290,19 @@ fn finding(f: &Finding, st: &Style, verbose: bool) -> String {
     } else {
         f.title.to_string()
     };
-    s.push_str(&format!(
-        "\n  {}  {:<48}{}  {}{}\n\n",
+    let severity = match f.outcome.status {
+        Status::Reported | Status::Skipped => "",
+        _ => f.severity,
+    };
+    let head = format!(
+        "  {}  {:<48}{}  {}{}",
         st.dim(f.id),
         title,
         st.paint(f.outcome.status, f.outcome.status.label()),
-        f.severity,
+        severity,
         st.dim(tag)
-    ));
+    );
+    s.push_str(&format!("\n{}\n\n", head.trim_end()));
     wrap("observed", &f.outcome.observed, &mut s);
     wrap("expected", &f.outcome.expected, &mut s);
     wrap("why", &f.outcome.why, &mut s);

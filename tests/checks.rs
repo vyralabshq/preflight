@@ -27,6 +27,7 @@ pub struct Host {
     pub sysctl: &'static [(&'static str, &'static str)],
     /// interface name, driver, as a symlink target under sysfs
     pub nic: Option<(&'static str, &'static str)>,
+    pub kernel: &'static str,
     /// any other file, given as an absolute path
     pub files: &'static [(&'static str, &'static str)],
 }
@@ -43,6 +44,7 @@ pub const FRESH_UBUNTU: Host = Host {
     flags: AVX2,
     mem_kb: 528_482_304,
     nic: Some(("eth0", "mlx5_core")),
+    kernel: "6.8.0-31-generic",
     disks: &[("sda", 500, false)],
     mounts: "/dev/sda1 / ext4 rw,relatime 0 0\n\
              /dev/sda2 /mnt/accounts ext4 rw,noatime 0 0\n\
@@ -195,7 +197,11 @@ pub fn build(h: &Host) -> PathBuf {
         "/etc/os-release",
         "PRETTY_NAME=\"Ubuntu 24.04.1 LTS\"\nNAME=\"Ubuntu\"\n",
     );
-    write(&root, "/proc/sys/kernel/osrelease", "6.8.0-31-generic\n");
+    write(
+        &root,
+        "/proc/sys/kernel/osrelease",
+        &format!("{}\n", h.kernel),
+    );
     write(
         &root,
         "/proc/meminfo",
@@ -562,11 +568,11 @@ fn run_ends_with_what_to_do_first() {
         "agave-validator@4.2.1",
     ]);
     assert!(
-        o.contains("next      3 fatal findings stop the validator from starting"),
+        o.contains("3 findings stop the validator from starting"),
         "{o}"
     );
     assert!(o.contains("PF-ARG-0001, PF-ARG-0003, PF-XDP-0001"), "{o}");
-    assert!(o.contains("the other 5 are drift"), "{o}");
+    assert!(flat(&o).contains("leave the node short"), "{o}");
 }
 
 #[test]
@@ -988,7 +994,7 @@ fn the_machine_question_comes_before_the_validator_question() {
 
     // and each half carries its own verdict
     assert!(
-        o.contains("must be fixed first") || o.contains("worth fixing"),
+        o.contains("requirements not met") || o.contains("worth fixing"),
         "{o}"
     );
     let (bare, _) = run(&["--root", &host(&FRESH_UBUNTU), "--profile", "testnet"]);
@@ -1249,7 +1255,16 @@ fn memory_check_does_not_present_512gb_as_required() {
     let (o, _) = run(&["--root", &host(&FRESH_UBUNTU), "--profile", "testnet", "-v"]);
     let block = block_for(&o, "PF-HW-0005");
     assert!(block.contains("no published minimum"), "{block}");
-    assert!(block.contains("testnet runs on far less"), "{block}");
+    assert!(
+        block.contains("REPORTED"),
+        "a measured value with no threshold is not Unknown:\n{block}"
+    );
+    // the expected line must not name one cluster while another is active
+    let (mainnet, _) = run(&["--root", &host(&FRESH_UBUNTU), "--profile", "mainnet", "-v"]);
+    assert!(
+        !block_for(&mainnet, "PF-HW-0005").contains("testnet runs on far less"),
+        "{mainnet}"
+    );
 }
 
 /// The profile has to change what a check demands, not just which checks run.
@@ -1385,8 +1400,8 @@ fn an_unlisted_cpu_is_reported_on_testnet_and_flagged_on_mainnet() {
     let (testnet, _) = run(&["--root", &root, "--profile", "testnet", "-v"]);
     let block = block_for(&testnet, "PF-HW-0006");
     assert!(
-        block.contains("UNKNOWN"),
-        "not a failure on testnet:\n{block}"
+        block.contains("REPORTED"),
+        "measured but unjudgeable is not a failed probe:\n{block}"
     );
 
     let (mainnet, _) = run(&["--root", &root, "--profile", "mainnet"]);
@@ -1439,4 +1454,51 @@ fn passing_checks_are_named_not_just_counted() {
         "-v",
     ]);
     assert!(!verbose.contains("checked and fine"), "{verbose}");
+}
+
+/// XDP is on by default since v4.2 and Anza gives a kernel floor for it. A box
+/// three minor versions below that floor was reported as entirely fine.
+#[test]
+fn an_old_kernel_under_xdp_is_reported() {
+    let old = Host {
+        name: "old-kernel",
+        kernel: "5.15.0-139-generic",
+        nic: Some(("eth0", "bnxt_en")),
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let (o, _) = run(&["--root", &host(&old), "--client", "agave-validator@4.3.0"]);
+    let block = block_for(&o, "PF-XDP-0002");
+    assert!(block.contains("FAIL"), "{block}");
+    assert!(flat(block).contains("kernel 5.15"), "{block}");
+    assert!(flat(block).contains("kernel 6.8 or newer"), "{block}");
+}
+
+/// igb needs a newer kernel than everything else, so the floor reads the card.
+#[test]
+fn the_kernel_floor_follows_the_driver() {
+    let igb = Host {
+        name: "igb-nic",
+        kernel: "6.10.0-generic",
+        nic: Some(("eth0", "igb")),
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let (o, _) = run(&["--root", &host(&igb), "--client", "agave-validator@4.3.0"]);
+    let block = block_for(&o, "PF-XDP-0002");
+    assert!(
+        block.contains("FAIL"),
+        "6.10 clears 6.8 but not igb's 6.14:\n{block}"
+    );
+    assert!(flat(block).contains("because the driver is igb"), "{block}");
+}
+
+#[test]
+fn a_current_kernel_passes_the_xdp_floor() {
+    let (o, _) = run(&[
+        "--root",
+        &host(&WRAPPER_SCRIPT_UNIT),
+        "--client",
+        "agave-validator@4.2.1",
+        "-v",
+    ]);
+    assert!(block_for(&o, "PF-XDP-0002").contains("PASS"), "{o}");
 }

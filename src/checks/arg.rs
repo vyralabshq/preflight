@@ -89,10 +89,10 @@ pub const S_DIO: &[Source] = &[Source {
     provisional: false,
 }];
 pub const S_43_LEDGER: &[Source] = &[Source {
-    kind: AgaveChangelog,
-    locator: "4.3.0-Unreleased Validator/Deprecations",
-    verified_against: "master 2026-08",
-    provisional: true,
+    kind: AgaveSymbol,
+    locator: "--limit-blockstore-size, present in agave-validator --help",
+    verified_against: "4.3.0-beta.0",
+    provisional: false,
 }];
 pub const S_43_TRACE: &[Source] = &[Source {
     kind: AgaveChangelog,
@@ -101,10 +101,10 @@ pub const S_43_TRACE: &[Source] = &[Source {
     provisional: true,
 }];
 pub const S_43_POOL: &[Source] = &[Source {
-    kind: AgaveChangelog,
-    locator: "4.3.0-Unreleased Validator/Breaking",
-    verified_against: "master 2026-08",
-    provisional: true,
+    kind: AgaveSymbol,
+    locator: "--tpu-connection-pool-size, absent from agave-validator --help",
+    verified_against: "4.3.0-beta.0",
+    provisional: false,
 }];
 
 const REMOVED_IN_40: &[&str] = &[
@@ -601,7 +601,9 @@ pub fn direct_io(ctx: &Ctx) -> Outcome {
     }
 }
 
-/// PF-ARG-0011. Provisional: sourced to 4.3.0-Unreleased.
+/// PF-ARG-0011. Confirmed against a real 4.3.0-beta.0 binary, which lists
+/// --limit-blockstore-size in its help. The changelog said so; the binary
+/// settles it.
 pub fn limit_ledger_size(ctx: &Ctx) -> Outcome {
     const WHY: &str = "Deprecated in favour of --limit-blockstore-size, which counts more \
         precisely. A non-default value does not carry across directly: doubling it is the \
@@ -622,7 +624,9 @@ pub fn limit_ledger_size(ctx: &Ctx) -> Outcome {
         ))
 }
 
-/// PF-ARG-0012. Provisional: sourced to 4.3.0-Unreleased.
+/// PF-ARG-0012. Still provisional, and `--help` cannot settle it: a deprecated
+/// no-op is hidden from help while still being accepted, so its absence there
+/// proves nothing either way.
 pub fn disable_banking_trace(ctx: &Ctx) -> Outcome {
     const WHY: &str = "Banking trace is disabled by default and this flag is a no-op, accepted \
         only for compatibility. Nothing breaks, but the flag no longer expresses anything, and \
@@ -643,7 +647,9 @@ pub fn disable_banking_trace(ctx: &Ctx) -> Outcome {
         ))
 }
 
-/// PF-ARG-0013. Provisional: sourced to 4.3.0-Unreleased.
+/// PF-ARG-0013. The flag is gone from a real 4.3.0-beta.0 binary's help, which
+/// matches the changelog calling it removed. A removed flag stops the validator
+/// starting, so this stays fatal.
 pub fn tpu_connection_pool_size(ctx: &Ctx) -> Outcome {
     const WHY: &str = "Removed. The connection pool size is fixed at 1, the previous default. \
         Like every removal this is a startup failure rather than a behaviour change.";

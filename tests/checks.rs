@@ -443,7 +443,10 @@ fn why_text_is_present_even_when_passing() {
 /// bad advice either way.
 #[test]
 fn provisional_checks_cannot_reach_a_released_client() {
-    let ids = ["PF-ARG-0011", "PF-ARG-0012", "PF-ARG-0013"];
+    // 0011 and 0013 were settled against a real 4.3.0-beta.0 binary and are no
+    // longer provisional. 0012 stays: --help cannot distinguish a hidden
+    // deprecated flag from a removed one.
+    let ids = ["PF-ARG-0012"];
     for client in [
         "agave-validator@4.0.5",
         "agave-validator@4.1.0",
@@ -1723,4 +1726,26 @@ fn the_headroom_figure_is_not_cited_to_anza() {
         flat(block).contains("headroom figure is preflight's own"),
         "the source must say so too:\n{block}"
     );
+}
+
+/// The changelog could not settle whether the 4.3 flags exist. A real
+/// 4.3.0-beta.0 binary could, and did: --limit-blockstore-size is in its help
+/// and --tpu-connection-pool-size is gone from it.
+#[test]
+fn the_settled_flags_cite_the_binary_not_the_changelog() {
+    let (o, _) = run(&["--dump-registry"]);
+    for id in ["PF-ARG-0011", "PF-ARG-0013"] {
+        let row = o.lines().find(|l| l.contains(id)).unwrap_or_default();
+        assert!(row.contains("4.3.0-beta.0"), "{row}");
+        assert!(
+            !row.contains("provisional"),
+            "settled, so not provisional: {row}"
+        );
+    }
+    // and the one it could not settle keeps saying so
+    let row = o
+        .lines()
+        .find(|l| l.contains("PF-ARG-0012"))
+        .unwrap_or_default();
+    assert!(row.contains("provisional"), "{row}");
 }

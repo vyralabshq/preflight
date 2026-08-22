@@ -201,7 +201,13 @@ pub fn capacity(ctx: &Ctx) -> Outcome {
         None => format!("at least {:.0}% free on each path", t.min_free * 100.0),
     };
     if short.is_empty() {
-        return Outcome::pass(seen.join(", "), expected).why(why);
+        // A pass implies a threshold was met. On a cluster nobody publishes
+        // figures for there is no threshold, so this reports like cores and
+        // memory do rather than claiming a bar was cleared.
+        return match t.accounts_gb.is_some() {
+            true => Outcome::pass(seen.join(", "), expected).why(why),
+            false => Outcome::reported(seen.join(", "), expected).why(why),
+        };
     }
     Outcome::fail(short.join("; "), expected).why(why)
 }

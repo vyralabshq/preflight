@@ -8,6 +8,7 @@ mod argv;
 mod checks;
 mod ctx;
 mod host;
+mod menu;
 mod model;
 mod privilege;
 mod registry;
@@ -17,10 +18,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use ctx::{Ctx, CtxOptions};
 use model::{Check, Finding, Layer, Profile};
 use render::Style;
-use std::{
-    io::{IsTerminal, Write},
-    path::PathBuf,
-};
+use std::{io::IsTerminal, path::PathBuf};
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
 pub enum ProfileArg {
@@ -152,44 +150,28 @@ fn selected(c: &Check, only: &[String], skip: &[String]) -> bool {
     !matches(skip)
 }
 
-/// Ask which cluster to judge against, defaulting to whatever was inferred.
+/// Ask which cluster to judge against, starting on whatever was inferred.
 ///
-/// Only when a person is watching: never when piped, never in CI, and never
-/// when --profile already said. Arrow key selection would mean putting the
-/// terminal in raw mode, which is a dependency this does not need; a number
-/// and Enter does the same job.
+/// Only when a person is watching: never when piped, never in CI, never when
+/// --profile already said.
 fn ask_profile(inferred: Profile, reason: &str, st: &Style) -> Profile {
     let options = [
         (Profile::Testnet, "a voting validator on testnet"),
         (Profile::Mainnet, "a voting validator on mainnet"),
         (Profile::Local, "a test validator, not joining a cluster"),
     ];
-    let default = options
+    let rows: Vec<(&str, &str)> = options.iter().map(|(p, d)| (p.label(), *d)).collect();
+    let start = options
         .iter()
         .position(|(p, _)| *p == inferred)
-        .unwrap_or(0)
-        + 1;
-
-    println!("\n{}", st.bold("Which are you asking about?"));
-    for (i, (p, description)) in options.iter().enumerate() {
-        let row = format!("  {}) {:<8} {}", i + 1, p.label(), description);
-        match i + 1 == default {
-            true => println!("{}", st.bold(&row)),
-            false => println!("{}", st.dim(&row)),
-        }
-    }
-    println!("{}", st.dim(&format!("  inferred: {reason}")));
-    print!("\n  [{default}] ");
-    let _ = std::io::stdout().flush();
-
-    let mut line = String::new();
-    if std::io::stdin().read_line(&mut line).is_err() {
-        return inferred;
-    }
-    match line.trim().parse::<usize>() {
-        Ok(n) if (1..=options.len()).contains(&n) => options[n - 1].0,
-        _ => inferred,
-    }
+        .unwrap_or(0);
+    let chosen = menu::select(
+        &st.bold("Which are you asking about?"),
+        &rows,
+        start,
+        &format!("inferred: {reason}"),
+    );
+    options[chosen].0
 }
 
 fn explain(id: &str, st: &Style) -> i32 {

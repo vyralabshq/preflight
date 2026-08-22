@@ -310,6 +310,30 @@ pub fn report(
     s
 }
 
+/// What was checked and found fine, by name.
+///
+/// A count alone tells an operator nothing: they cannot tell whether the tool
+/// looked at the thing they were worried about. Under -v these are already
+/// printed in full, so the list would only repeat them.
+fn passing(findings: &[&Finding], st: &Style, verbose: bool) -> String {
+    if verbose {
+        return String::new();
+    }
+    let mut passed: Vec<&&Finding> = findings
+        .iter()
+        .filter(|f| f.outcome.status == Status::Pass)
+        .collect();
+    passed.sort_by_key(|f| f.id);
+    if passed.is_empty() {
+        return String::new();
+    }
+    let mut s = format!("\n{}\n", st.bold("checked and fine"));
+    for f in passed {
+        s.push_str(&st.dim(&format!("  {}  {}\n", f.id, f.title)));
+    }
+    s
+}
+
 /// "1 check needs" but "2 checks need".
 fn plural(n: usize, one: &'static str, many: &'static str) -> &'static str {
     match n {
@@ -430,6 +454,7 @@ fn phase_block(
             s.push_str(&finding(f, st, true));
         }
     }
+    s.push_str(&passing(&mine, st, verbose));
     s
 }
 

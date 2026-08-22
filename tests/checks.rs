@@ -1416,3 +1416,27 @@ fn the_profile_prompt_never_blocks_a_pipe() {
     let (json, _) = run(&["--root", &host(&FRESH_UBUNTU), "--format", "json"]);
     assert!(json.starts_with('{'), "{json}");
 }
+
+/// A count of passing checks tells an operator nothing. They cannot tell
+/// whether the thing they were worried about was even looked at.
+#[test]
+fn passing_checks_are_named_not_just_counted() {
+    let (o, _) = run(&[
+        "--root",
+        &host(&WRAPPER_SCRIPT_UNIT),
+        "--client",
+        "agave-validator@4.2.1",
+    ]);
+    assert!(o.contains("checked and fine"), "{o}");
+    assert!(o.contains("PF-KRN-0001  net.core.rmem_max"), "{o}");
+
+    // under -v the full block is already printed, so the list would repeat it
+    let (verbose, _) = run(&[
+        "--root",
+        &host(&WRAPPER_SCRIPT_UNIT),
+        "--client",
+        "agave-validator@4.2.1",
+        "-v",
+    ]);
+    assert!(!verbose.contains("checked and fine"), "{verbose}");
+}

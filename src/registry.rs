@@ -5,7 +5,7 @@
 //! stays greppable and boring.
 
 use crate::{
-    checks::{arg, fs, hw, kernel, xdp},
+    checks::{arg, fs, hw, kernel, net, xdp},
     model::{Check, ClientKind::*, Layer, Profile::*, Severity::*},
 };
 
@@ -148,6 +148,30 @@ pub static CHECKS: &[Check] = &[
         reports_only: false,
         source: fs::S_DIO,
         run: fs::direct_io_support,
+    },
+    Check {
+        id: "PF-NET-0001",
+        layer: Layer::Net,
+        severity: Degraded,
+        title: "Network driver carries the XDP transmit path",
+        profiles: &[Testnet, Mainnet],
+        clients: ANY_CLIENT,
+        needs_root: false,
+        reports_only: false,
+        source: net::S_HCL,
+        run: net::xdp_driver_support,
+    },
+    Check {
+        id: "PF-HW-0006",
+        layer: Layer::Hw,
+        severity: Degraded,
+        title: "CPU is one somebody has reported on",
+        profiles: &[Testnet, Mainnet],
+        clients: ANY_CLIENT,
+        needs_root: false,
+        reports_only: false,
+        source: hw::S_HCL,
+        run: hw::on_recommended_list,
     },
     Check {
         id: "PF-KRN-0001",

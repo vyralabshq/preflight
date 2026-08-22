@@ -192,3 +192,63 @@ pub fn memory(ctx: &Ctx) -> Outcome {
         _ => Outcome::unknown(observed).expected(EXPECTED).why(WHY),
     }
 }
+
+/// CPUs the community list marks recommended, with base clock and the PoH rate
+/// operators have reported. Clock and PoH are what decide whether you keep up,
+/// which is why a 16 core part sits alongside a 64 core one here.
+const RECOMMENDED: &[(&str, &str, &str)] = &[
+    ("Ryzen Threadripper PRO 7965WX", "4.20 GHz", "22.2M, 20.4M"),
+    ("Ryzen Threadripper PRO 7975WX", "4.00 GHz", "not reported"),
+    ("Ryzen Threadripper PRO 7985WX", "3.20 GHz", "not reported"),
+    ("Ryzen Threadripper 7960X", "4.20 GHz", "20.6M, 19.9M"),
+    ("Ryzen 9 7950X", "4.50 GHz", "22.4M"),
+    ("Ryzen 9 9950X", "4.30 GHz", "23M"),
+    ("EPYC 9274F", "4.05 GHz", "18.1M"),
+    ("EPYC 9275F", "4.10 GHz", "19.3M"),
+    ("EPYC 9374F", "3.85 GHz", "18.2M"),
+    ("EPYC 9375F", "3.80 GHz", "18.9M-19.3M"),
+    ("EPYC 9254", "2.90 GHz", "17.5M"),
+    ("EPYC 9354P", "3.25 GHz", "16.1M, 14.4M"),
+];
+
+/// PF-HW-0006. Whether anyone has reported this CPU keeping up.
+///
+/// Advisory on testnet, where operators run far more varied hardware. On
+/// mainnet a part nobody has reported on is worth knowing about before you take
+/// stake, since the cost of finding out is missed blocks.
+pub fn on_recommended_list(ctx: &Ctx) -> Outcome {
+    const WHY: &str = "The community list records CPUs operators have run and the PoH hash rate \
+        each reached. Being absent is not a failure: nobody has reported on it, which is a \
+        different thing from it being unsuitable. It does mean you are the first to find out, and \
+        on mainnet that is discovered as missed blocks.";
+    const EXPECTED: &str = "a CPU somebody has reported PoH numbers for";
+
+    if let Some(o) = needs_linux(ctx, WHY) {
+        return o;
+    }
+    let Some(model) = ctx.facts.cpu_model.clone() else {
+        return Outcome::unknown("CPU model not reported")
+            .expected(EXPECTED)
+            .why(WHY);
+    };
+
+    // Model strings carry suffixes like "16-Core Processor" that the list omits.
+    let listed = RECOMMENDED.iter().find(|(name, _, _)| model.contains(name));
+
+    match (listed, ctx.profile) {
+        (Some((name, clock, poh)), _) => Outcome::pass(
+            format!("{name} is on the list, base {clock}, reported PoH {poh}"),
+            EXPECTED,
+        )
+        .why(WHY),
+        (None, Profile::Mainnet) => Outcome::fail(format!("{model} is not on the list"), EXPECTED)
+            .why(WHY)
+            .fix(vec![FixStep::noted(
+                "measure your PoH rate before taking stake, and compare against the list",
+                "the listed parts report roughly 14M to 23M hashes per second",
+            )]),
+        (None, _) => Outcome::unknown(format!("{model} is not on the list"))
+            .expected(EXPECTED)
+            .why(WHY),
+    }
+}

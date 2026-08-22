@@ -482,3 +482,139 @@ pub fn direct_io_support(ctx: &Ctx) -> Outcome {
         "or move the accounts path to ext4 or xfs, which is the better answer",
     )])
 }
+
+/// Agave's own sizing, from the comment block above DEFAULT_MAX_BLOCKSTORE_SHREDS.
+const BYTES_PER_SHRED: f64 = 1250.0;
+const DEFAULT_BLOCKSTORE_SHREDS: f64 = 400_000_000.0;
+const LEGACY_DEFAULT_LEDGER_SHREDS: f64 = 200_000_000.0;
+
+pub const S_RETENTION: &[Source] = &[Source {
+    kind: AgaveSymbol,
+    locator: "DEFAULT_MAX_BLOCKSTORE_SHREDS and the sizing comment above it in cleanup_service.rs",
+    verified_against: "agave master",
+    provisional: false,
+}];
+
+/// PF-FS-0007. Does the ledger's retention target fit the disk holding it?
+///
+/// Two checks each hold half of this. One knows free space, the other knows the
+/// retention setting, and neither says the thing that matters: a blockstore
+/// aimed at more disk than exists is a future outage with a stated mechanism.
+pub fn retention_fits_disk(ctx: &Ctx) -> Outcome {
+    const WHY: &str = "Agave sizes the blockstore in shreds and approximates a shred at 1250 \
+        bytes, so a retention target converts to a disk footprint. The default aims at 500 GB, \
+        which the source says in as many words. If that target is larger than the filesystem \
+        holding the ledger, the node does not fail today: it fills the disk on its way to a size \
+        it was told to reach, and the failure arrives weeks later with no warning attached to it.";
+    const EXPECTED: &str = "a retention target the ledger's filesystem can hold";
+
+    if let Some(o) = needs_linux(ctx, WHY) {
+        return o;
+    }
+    let Some(inv) = ctx.inv() else {
+        return Outcome::skipped("no validator yet, so no retention target");
+    };
+    let Some(ledger) = inv.value("--ledger") else {
+        return Outcome::skipped("no --ledger path in the invocation");
+    };
+
+    // Total shreds either way: the legacy flag counts data only, and agave
+    // assumes a 1:1 data to coding ratio, so the budget is twice the number.
+    let total_shreds = match (
+        inv.value("--limit-blockstore-size"),
+        inv.has("--limit-ledger-size"),
+        inv.value("--limit-ledger-size"),
+    ) {
+        (Some(v), ..) => v.parse::<f64>().unwrap_or(DEFAULT_BLOCKSTORE_SHREDS),
+        (None, true, Some(v)) => v.parse::<f64>().unwrap_or(LEGACY_DEFAULT_LEDGER_SHREDS) * 2.0,
+        (None, true, None) => LEGACY_DEFAULT_LEDGER_SHREDS * 2.0,
+        (None, false, _) => DEFAULT_BLOCKSTORE_SHREDS,
+    };
+    let target_gb = total_shreds * BYTES_PER_SHRED / 1e9;
+
+    let all = mounts(ctx);
+    let Some(m) = mount_for(&all, &ledger) else {
+        return Outcome::unknown(format!("no mount found for {ledger}"))
+            .expected(EXPECTED)
+            .why(WHY);
+    };
+    let facts = ctx.facts.mounts.iter().find(|x| x.target == m.target);
+    let (Some(free), Some(total)) = (
+        facts.and_then(|x| x.free_gb),
+        facts.and_then(|x| x.total_gb),
+    ) else {
+        // Under --root the numbers would describe the machine running preflight,
+        // so this is out of scope rather than a failed probe.
+        return match ctx.fs.is_prefixed() {
+            true => Outcome::skipped("free space cannot be read from a captured tree"),
+            false => Outcome::unknown(format!("free space on {} not measured", m.target))
+                .expected(EXPECTED)
+                .why(WHY),
+        };
+    };
+
+    let observed = format!(
+        "retention targets about {target_gb:.0} GB; {} has {free:.0} GB free of {total:.0} GB",
+        m.target
+    );
+    let expected = format!("a target at or under what {} can hold", m.target);
+    let verify = format!("du -sh {ledger}/rocksdb");
+
+    // Some of the target may already be on disk, so free space alone
+    // understates capacity. Total does not.
+    if target_gb > total {
+        return Outcome::fail(observed, expected)
+            .why(format!(
+                "{WHY} This target is larger than the whole filesystem, so it can never be met."
+            ))
+            .fix(retention_fix(ctx, target_gb, total))
+            .verify(verify);
+    }
+    if target_gb > free {
+        return Outcome::fail(observed, expected)
+            .why(format!(
+                "{WHY} Part of that target may already be on disk, which free space alone does \
+                 not show, so check the current size before deciding how much room is left."
+            ))
+            .fix(retention_fix(ctx, target_gb, free))
+            .verify(verify);
+    }
+    Outcome::pass(observed, expected).why(WHY).verify(verify)
+}
+
+/// Both ways out, including the one that uses hardware already paid for.
+fn retention_fix(ctx: &Ctx, target_gb: f64, room_gb: f64) -> Vec<FixStep> {
+    let shreds = (room_gb * 0.8 * 1e9 / BYTES_PER_SHRED) as u64;
+    let mut steps = vec![FixStep::noted(
+        format!("--limit-blockstore-size {shreds}"),
+        format!(
+            "sized to about 80% of the {room_gb:.0} GB available rather than the {target_gb:.0} \
+             GB default"
+        ),
+    )];
+
+    // An idle device next door is the better answer than shrinking history.
+    let idle: Vec<String> = ctx
+        .facts
+        .disks
+        .iter()
+        .filter(|d| !d.rotational)
+        .filter(|d| {
+            !ctx.facts
+                .mounts
+                .iter()
+                .any(|m| m.free_gb.unwrap_or(0.0) < room_gb + 1.0 && m.target.contains(&d.name))
+        })
+        .map(|d| format!("{} holds {:.0} GB", d.name, d.size_gb))
+        .collect();
+    if !idle.is_empty() {
+        steps.push(FixStep::noted(
+            "or move the ledger or snapshots onto another device",
+            format!(
+                "this host has {}. Splitting them is what Anza's separate-device layout is for",
+                idle.join(", ")
+            ),
+        ));
+    }
+    steps
+}

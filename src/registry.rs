@@ -161,6 +161,17 @@ pub static CHECKS: &[Check] = &[
         run: hw::on_recommended_list,
     },
     Check {
+        id: "PF-FS-0007",
+        layer: Layer::Fs,
+        severity: Degraded,
+        title: "Ledger retention fits the disk holding it",
+        profiles: &[Testnet, Mainnet],
+        clients: AGAVE,
+        needs_root: false,
+        source: fs::S_RETENTION,
+        run: fs::retention_fits_disk,
+    },
+    Check {
         id: "PF-HW-0007",
         layer: Layer::Hw,
         severity: Advisory,

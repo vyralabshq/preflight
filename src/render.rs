@@ -532,6 +532,19 @@ fn phase_block(
     s
 }
 
+/// How many requirements each half left unmet, so the closing line can lead
+/// with the machine rather than reassuring about startup underneath a "no".
+fn unmet_in(findings: &[Finding], phase: Phase) -> usize {
+    findings
+        .iter()
+        .filter(|f| {
+            f.phase == phase
+                && f.outcome.status == Status::Fail
+                && (f.severity == "fatal" || f.severity == "degraded")
+        })
+        .count()
+}
+
 fn summary(ctx: &Ctx, findings: &[Finding], st: &Style) -> String {
     // Nothing ran, and the verdict already said why. Counts would be filler.
     if !ctx.is_linux() && !ctx.fs.is_prefixed() {
@@ -654,10 +667,29 @@ fn summary(ctx: &Ctx, findings: &[Finding], st: &Style) -> String {
             )));
         }
     } else if unmet > 0 {
+        let machine = unmet_in(findings, Phase::Machine);
+        let config = unmet_in(findings, Phase::Validator);
+        let head = match (machine, config) {
+            // Lead with the machine, because "it will start" under a verdict
+            // that says the box is not suitable reads as permission.
+            (m, 0) if m > 0 => format!(
+                "this machine does not meet {m} requirement{} for {}",
+                plural(m, "", "s"),
+                ctx.profile.label()
+            ),
+            (0, c) => format!(
+                "the validator will start, with {c} requirement{} unmet in its configuration",
+                plural(c, "", "s")
+            ),
+            (m, c) => format!(
+                "the machine misses {m} requirement{} for {}, and its configuration misses {c}",
+                plural(m, "", "s"),
+                ctx.profile.label()
+            ),
+        };
         line.push_str(&format!(
-            "\nnext      the validator will start. {unmet} requirement{} not met, so it runs\n\
-             \x20         short of what it should be\n",
-            plural(unmet, " is", "s are")
+            "\nnext      {head}.\n\
+             \x20         nothing stops it starting, so this is about whether it keeps up\n"
         ));
     } else if advisory > 0 {
         line.push_str(&format!(

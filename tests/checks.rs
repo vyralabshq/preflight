@@ -1648,3 +1648,37 @@ fn an_unguarded_xdp_path_leads_with_the_fallback() {
         "the fallback comes first:\n{block}"
     );
 }
+
+/// A machine that fails mainnet requirements must not be told "the validator
+/// will start" as its closing line. Under a verdict that just said no, that
+/// reads as permission.
+#[test]
+fn the_closing_line_leads_with_the_machine() {
+    // Shaped like a working testnet box that is not a mainnet box: valid
+    // configuration, a CPU nobody has reported mainnet numbers for.
+    let small = Host {
+        name: "mainnet-unsuitable",
+        cpu_model: "AMD EPYC 7313P 16-Core Processor",
+        ..XDP_AMBIENT_OK
+    };
+    let (o, _) = run(&[
+        "--root",
+        &host(&small),
+        "--client",
+        "agave-validator@4.2.1",
+        "--profile",
+        "mainnet",
+    ]);
+    assert!(
+        o.contains("CAN THIS MACHINE RUN A MAINNET VALIDATOR?"),
+        "{o}"
+    );
+    assert!(
+        !flat(&o).contains("next the validator will start"),
+        "must not open with reassurance under a no:\n{o}"
+    );
+    assert!(
+        flat(&o).contains("this machine does not meet") || flat(&o).contains("the machine misses"),
+        "{o}"
+    );
+}

@@ -79,6 +79,8 @@ next      4 fatal findings stop the validator from starting
 cargo install --git https://github.com/vyralabshq/preflight
 ```
 
+From a clone: `make install` puts it on your PATH, `make` lists the rest.
+
 Nothing needs to go on the validator itself if you would rather not. See
 `--invocation` and `--root` below.
 

@@ -9,7 +9,8 @@ help:
 	  | sed -e 's/^## /@/' -e 's/:.*//' \
 	  | awk '/^@/{d=substr($$0,2); next} {printf "    make %-10s %s\n", $$0, d}'
 	@echo
-	@echo "  Anything not listed:  cargo run -- --help"
+	@echo "  Pass flags:  make check ARGS=\"--profile mainnet\""
+	@echo "  Everything:  cargo run -- --help"
 	@echo
 
 ## run every test
@@ -17,19 +18,19 @@ test:
 	cargo test
 
 ## run preflight against this machine
-# preflight signals findings through its exit code, so a non-zero result is the
-# tool working. Only an internal error (3) is a build failure.
 check:
-	@cargo run --quiet --; c=$$?; [ $$c -eq 3 ] && exit 3 || exit 0
+	@cargo run --quiet -- $(ARGS); c=$$?; echo; echo "exit code $$c"; \
+	  [ $$c -eq 3 ] && exit 3 || exit 0
 
 ## print every check and where its requirement comes from
 registry:
 	@cargo run --quiet -- --dump-registry
 
-## build a release binary into target/release/preflight
+## put preflight on your PATH
 install:
-	cargo build --release
-	@echo "binary: target/release/preflight"
+	cargo install --path .
+	@echo
+	@echo "now just run:  preflight"
 
 ## remove build artefacts
 clean:

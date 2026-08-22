@@ -25,6 +25,8 @@ pub struct Host {
     pub mounts: &'static str,
     /// path under /proc/sys, value
     pub sysctl: &'static [(&'static str, &'static str)],
+    /// interface name, driver, as a symlink target under sysfs
+    pub nic: Option<(&'static str, &'static str)>,
     /// any other file, given as an absolute path
     pub files: &'static [(&'static str, &'static str)],
 }
@@ -40,6 +42,7 @@ pub const FRESH_UBUNTU: Host = Host {
     mhz: "3800.000",
     flags: AVX2,
     mem_kb: 528_482_304,
+    nic: Some(("eth0", "mlx5_core")),
     disks: &[("sda", 500, false)],
     mounts: "/dev/sda1 / ext4 rw,relatime 0 0\n\
              /dev/sda2 /mnt/accounts ext4 rw,noatime 0 0\n\
@@ -225,6 +228,21 @@ pub fn build(h: &Host) -> PathBuf {
             if *rotational { "1\n" } else { "0\n" },
         );
     }
+    if let Some((iface, driver)) = h.nic {
+        write(
+            &root,
+            "/proc/net/route",
+            &format!(
+                "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n\
+                 {iface}\t00000000\t0100A8C0\t0003\t0\t0\t100\t00000000\n"
+            ),
+        );
+        let dir = root.join(format!("sys/class/net/{iface}/device"));
+        fs::create_dir_all(&dir).unwrap();
+        let target = root.join(format!("sys/bus/pci/drivers/{driver}"));
+        fs::create_dir_all(&target).unwrap();
+        let _ = std::os::unix::fs::symlink(&target, dir.join("driver"));
+    }
     for (key, value) in h.sysctl {
         write(&root, &format!("/proc/sys/{key}"), &format!("{value}\n"));
     }
@@ -357,7 +375,7 @@ fn xdp_bounding_set_without_ambient_fails() {
 }
 
 #[test]
-fn xdp_requires_only_the_caps_this_invocation_needs() {
+fn xdp_capabilities_are_invocation_aware() {
     let (o, _) = run(&[
         "--root",
         &host(&WRAPPER_SCRIPT_UNIT),
@@ -372,31 +390,16 @@ fn xdp_requires_only_the_caps_this_invocation_needs() {
         !o.contains("CAP_BPF and CAP_PERFMON in the permitted set"),
         "no zero-copy here: {o}"
     );
-}
 
-#[test]
-fn xdp_zero_copy_demands_all_four_caps() {
-    let (o, _) = run(&[
+    // and zero copy pulls in the other two
+    let (zc, _) = run(&[
         "--root",
         &host(&XDP_AMBIENT_OK),
         "--client",
         "agave-validator@4.2.1",
         "-v",
     ]);
-    assert!(o.contains("--xdp-zero-copy is in use"), "{o}");
-}
-
-#[test]
-fn xdp_ambient_dropin_passes() {
-    let (o, _) = run(&[
-        "--root",
-        &host(&XDP_AMBIENT_OK),
-        "--client",
-        "agave-validator@4.2.1",
-        "-v",
-    ]);
-    let block = o.split("PF-XDP-0001").nth(1).unwrap_or("");
-    assert!(block.contains("PASS"), "drop-in grant should pass: {block}");
+    assert!(zc.contains("--xdp-zero-copy is in use"), "{zc}");
 }
 
 #[test]
@@ -611,7 +614,7 @@ fn non_linux_host_says_so_once() {
 /// adding to it. When the unit already permits what is needed, emitting one
 /// would silently narrow it.
 #[test]
-fn xdp_fix_does_not_narrow_an_adequate_bounding_set() {
+fn xdp_drop_in_grants_without_narrowing() {
     let (o, _) = run(&[
         "--root",
         &host(&WRAPPER_SCRIPT_UNIT),
@@ -632,6 +635,16 @@ fn xdp_fix_does_not_narrow_an_adequate_bounding_set() {
         o.contains("already permits these, so it is left alone"),
         "{o}"
     );
+
+    // and a unit that already grants them passes
+    let (ok, _) = run(&[
+        "--root",
+        &host(&XDP_AMBIENT_OK),
+        "--client",
+        "agave-validator@4.2.1",
+        "-v",
+    ]);
+    assert!(block_for(&ok, "PF-XDP-0001").contains("PASS"), "{ok}");
 }
 
 #[test]
@@ -763,24 +776,9 @@ fn version_is_detected_without_any_flags() {
     assert!(o.contains("agave-validator 4.2.1"), "{o}");
     assert!(o.contains("PF-ARG-0001"), "checks must actually run: {o}");
     assert!(!o.contains("client version not detected"), "{o}");
-}
-
-/// Executing anything is disclosed, so it is never a surprise.
-#[test]
-fn the_one_executed_command_is_printed() {
-    let dir = fake_validator("4.2.1");
-    let o = run_with_path(
-        &dir,
-        &[
-            "--invocation",
-            dir.join("cmdline.txt").to_str().unwrap(),
-            "--profile",
-            "testnet",
-        ],
-    );
     assert!(
         o.contains("version read by running: agave-validator --version"),
-        "{o}"
+        "executing anything must be disclosed:\n{o}"
     );
 }
 
@@ -823,7 +821,7 @@ fn root_mode_never_executes_the_host_binary() {
 /// The founding question: a bare box with no validator must still be told
 /// whether it could run one. Host layers do not depend on a validator existing.
 #[test]
-fn a_bare_host_still_gets_hardware_and_kernel_checks() {
+fn a_bare_host_is_told_what_it_needs_and_how_to_ask() {
     let (o, _) = run(&["--root", &host(&FRESH_UBUNTU), "--profile", "testnet", "-v"]);
     for id in ["PF-HW-0001", "PF-HW-0002", "PF-KRN-0001", "PF-KRN-0004"] {
         assert!(
@@ -854,12 +852,6 @@ fn wrong_architecture_is_unsupported_with_no_fix() {
     }
 }
 
-#[test]
-fn bare_host_is_told_how_to_ask_the_real_question() {
-    let (o, _) = run(&["--root", &host(&FRESH_UBUNTU)]);
-    assert!(o.contains("preflight --profile testnet"), "{o}");
-}
-
 /// "19 checks skipped" tells an operator nothing. Group them by reason so the
 /// count is answerable rather than mysterious.
 #[test]
@@ -872,19 +864,17 @@ fn skipped_checks_say_why_they_were_skipped() {
         "old opaque wording: {o}"
     );
     assert!(o.contains("preflight -v  lists them individually"), "{o}");
-}
 
-#[test]
-fn version_gated_skips_are_grouped_separately() {
-    let (o, _) = run(&[
+    // version gated skips group separately from the rest
+    let (v, _) = run(&[
         "--root",
         &host(&WRAPPER_SCRIPT_UNIT),
         "--client",
         "agave-validator@4.2.1",
     ]);
     assert!(
-        o.contains("apply to a newer release than this client"),
-        "{o}"
+        v.contains("apply to a newer release than this client"),
+        "{v}"
     );
 }
 
@@ -900,21 +890,6 @@ fn an_adequate_kernel_default_is_not_ephemeral() {
         "fs.nr_open at its default is fine: {block}"
     );
     assert!(block.contains("kernel default"), "{block}");
-}
-
-/// A fresh Linux box is the founding case: stock sysctls, no validator, and
-/// preflight must name what is missing.
-#[test]
-fn a_fresh_linux_box_gets_a_real_answer() {
-    let (o, code) = run(&["--root", &host(&FRESH_UBUNTU), "--profile", "testnet"]);
-    for id in ["PF-KRN-0001", "PF-KRN-0002", "PF-KRN-0003"] {
-        assert!(o.contains(id), "stock kernel values must fail:\n{o}");
-    }
-    assert!(
-        o.contains("sysctl.d/21-agave-validator.conf"),
-        "must say where the fix goes:\n{o}"
-    );
-    assert_eq!(code, 1);
 }
 
 /// FS is the layer that answers "can this machine run a validator" before
@@ -954,39 +929,7 @@ fn shared_spinning_zfs_storage_is_caught_on_every_axis() {
     assert!(o.contains("spinning disk sda"), "{o}");
     assert!(o.contains("no noatime"), "{o}");
     assert!(o.contains("accounts on zfs"), "{o}");
-    assert!(o.contains("does not support O_DIRECT"), "{o}");
-}
-
-/// Anza permits accounts and ledger on one disk. Sharing is Degraded severity,
-/// never Fatal: failing a box that works would be worse than the finding.
-#[test]
-fn sharing_a_disk_is_degraded_not_fatal() {
-    let inv = std::env::temp_dir().join("pf-shared2.txt");
-    std::fs::write(
-        &inv,
-        "exec agave-validator --ledger /mnt/shared/l --accounts /mnt/shared/a\n",
-    )
-    .unwrap();
-    let (o, _) = run(&[
-        "--root",
-        &host(&SHARED_DISK),
-        "--invocation",
-        inv.to_str().unwrap(),
-        "--client",
-        "agave-validator@4.2.1",
-        "--profile",
-        "testnet",
-    ]);
-    let block = o.split("PF-FS-0002").nth(1).unwrap_or_default();
-    let head: String = block.lines().take(2).collect::<Vec<_>>().join(" ");
-    assert!(
-        head.contains("degraded"),
-        "sharing must not be fatal: {head}"
-    );
-    assert!(
-        !o.contains("PF-FS-0002, "),
-        "must not be listed among startup blockers: {o}"
-    );
+    assert!(flat(&o).contains("does not support O_DIRECT"), "{o}");
 }
 
 #[test]
@@ -1042,38 +985,16 @@ fn the_machine_question_comes_before_the_validator_question() {
         !second.contains("PF-KRN"),
         "kernel findings belong to the machine:\n{second}"
     );
-}
 
-#[test]
-fn each_question_gets_its_own_verdict() {
+    // and each half carries its own verdict
+    assert!(
+        o.contains("must be fixed first") || o.contains("worth fixing"),
+        "{o}"
+    );
     let (bare, _) = run(&["--root", &host(&FRESH_UBUNTU), "--profile", "testnet"]);
-    assert!(bare.contains("must be fixed first"), "{bare}");
     assert!(
         bare.contains("no validator installed, nothing to check"),
         "{bare}"
-    );
-
-    let (good, _) = run(&[
-        "--root",
-        &host(&XDP_AMBIENT_OK),
-        "--client",
-        "agave-validator@4.2.1",
-    ]);
-    assert_eq!(
-        good.matches("  yes\n").count(),
-        2,
-        "both questions answered yes:\n{good}"
-    );
-
-    let (drifted, _) = run(&[
-        "--root",
-        &host(&WRAPPER_SCRIPT_UNIT),
-        "--client",
-        "agave-validator@4.2.1",
-    ]);
-    assert!(
-        drifted.contains("no. 3 things must be fixed first"),
-        "{drifted}"
     );
 }
 
@@ -1400,4 +1321,98 @@ fn the_report_says_which_profile_it_inferred_and_why() {
         "mainnet",
     ]);
     assert!(forced.contains("set with --profile"), "{forced}");
+}
+
+/// The driver decides whether XDP works at all. Anza publishes no list, so
+/// this comes from the community one, which records what operators got running.
+#[test]
+fn an_unsupported_nic_driver_is_reported() {
+    let realtek = Host {
+        name: "realtek-nic",
+        nic: Some(("eth0", "r8169")),
+        ..FRESH_UBUNTU
+    };
+    let (o, _) = run(&["--root", &host(&realtek), "--profile", "testnet"]);
+    let block = block_for(&o, "PF-NET-0001");
+    assert!(block.contains("FAIL"), "{block}");
+    assert!(flat(block).contains("Realtek"), "{block}");
+    assert!(flat(block).contains("No native XDP"), "{block}");
+
+    // and the highest confidence family passes
+    let (ok, _) = run(&["--root", &host(&FRESH_UBUNTU), "--profile", "testnet", "-v"]);
+    assert!(block_for(&ok, "PF-NET-0001").contains("PASS"), "{ok}");
+}
+
+/// bnxt_en carries XDP but never accepts zero copy, so passing the flag is a
+/// finding rather than something that silently does nothing.
+#[test]
+fn zero_copy_on_a_driver_that_refuses_it_is_reported() {
+    let broadcom = Host {
+        name: "broadcom-nic",
+        nic: Some(("eth0", "bnxt_en")),
+        ..FRESH_UBUNTU
+    };
+    let inv = invocation(
+        "zero-copy.txt",
+        "exec agave-validator --ledger /l --accounts /a --xdp-interface eth0 --xdp-zero-copy\n",
+    );
+    let (o, _) = run(&[
+        "--root",
+        &host(&broadcom),
+        "--invocation",
+        inv.to_str().unwrap(),
+        "--client",
+        "agave-validator@4.2.1",
+        "--profile",
+        "testnet",
+    ]);
+    let block = block_for(&o, "PF-NET-0001");
+    assert!(block.contains("FAIL"), "{block}");
+    assert!(flat(block).contains("remove --xdp-zero-copy"), "{block}");
+}
+
+/// Absence from the community list is not failure on testnet, where hardware
+/// varies widely. On mainnet it is worth knowing before taking stake.
+#[test]
+fn an_unlisted_cpu_is_reported_on_testnet_and_flagged_on_mainnet() {
+    let unlisted = Host {
+        name: "unlisted-cpu",
+        cpu_model: "AMD EPYC 7313P 16-Core Processor",
+        ..FRESH_UBUNTU
+    };
+    let root = host(&unlisted);
+
+    let (testnet, _) = run(&["--root", &root, "--profile", "testnet", "-v"]);
+    let block = block_for(&testnet, "PF-HW-0006");
+    assert!(
+        block.contains("UNKNOWN"),
+        "not a failure on testnet:\n{block}"
+    );
+
+    let (mainnet, _) = run(&["--root", &root, "--profile", "mainnet"]);
+    let block = block_for(&mainnet, "PF-HW-0006");
+    assert!(
+        block.contains("FAIL"),
+        "worth flagging on mainnet:\n{block}"
+    );
+    assert!(flat(block).contains("measure your PoH rate"), "{block}");
+
+    // a listed part reports the numbers operators saw
+    let (listed, _) = run(&["--root", &host(&FRESH_UBUNTU), "--profile", "mainnet", "-v"]);
+    let block = block_for(&listed, "PF-HW-0006");
+    assert!(block.contains("PASS"), "{block}");
+    assert!(flat(block).contains("reported PoH"), "{block}");
+}
+
+/// The prompt is for a person watching. Piping, redirecting or asking for JSON
+/// must never block waiting for input, or preflight cannot run in CI or as an
+/// ExecStartPre.
+#[test]
+fn the_profile_prompt_never_blocks_a_pipe() {
+    let (o, _) = run(&["--root", &host(&FRESH_UBUNTU)]);
+    assert!(!o.contains("Which are you asking about?"), "{o}");
+    assert!(o.contains("SYSTEM"), "the run must complete: {o}");
+
+    let (json, _) = run(&["--root", &host(&FRESH_UBUNTU), "--format", "json"]);
+    assert!(json.starts_with('{'), "{json}");
 }

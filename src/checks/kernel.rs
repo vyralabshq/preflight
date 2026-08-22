@@ -4,7 +4,7 @@
 
 use crate::{
     ctx::Ctx,
-    model::{FixStep, Outcome, Persistence, Source, SourceKind::*},
+    model::{ClientKind, FixStep, Outcome, Persistence, Source, SourceKind::*},
 };
 
 pub const S_LIMITS: &[Source] = &[
@@ -21,6 +21,12 @@ pub const S_LIMITS: &[Source] = &[
         provisional: false,
     },
 ];
+pub const S_XDP_KERNEL: &[Source] = &[Source {
+    kind: AnzaBlog,
+    locator: "anza.xyz/blog/agave-xdp-setup-guide",
+    verified_against: "2026-08",
+    provisional: false,
+}];
 pub const S_NR_OPEN: &[Source] = &[Source {
     kind: AnzaDocs,
     locator: "docs.anza.xyz/operations/setup-a-validator, System Tuning",
@@ -185,4 +191,88 @@ pub fn nr_open(ctx: &Ctx) -> Outcome {
          this.",
         "",
     )
+}
+
+/// Anza's floor for the XDP transmit path, by driver.
+const KERNEL_FLOOR: (u32, u32) = (6, 8);
+const KERNEL_FLOOR_IGB: (u32, u32) = (6, 14);
+
+fn kernel_version(ctx: &Ctx) -> Option<(u32, u32)> {
+    let raw = ctx.fs.read_trim("/proc/sys/kernel/osrelease")?;
+    let mut parts = raw.split(['.', '-']);
+    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+}
+
+/// PF-XDP-0002. Whether the kernel is new enough for the transmit path agave
+/// now uses by default.
+///
+/// The floor depends on the driver, so this reads the card before deciding.
+pub fn xdp_floor(ctx: &Ctx) -> Outcome {
+    const WHY: &str = "XDP transmit is on by default on Linux since v4.2, and Anza's setup guide \
+        gives a kernel floor for it: 6.14 when the driver is igb, 6.8 otherwise. Below that the \
+        path is either unavailable or unreliable, and the node quietly falls back or misbehaves \
+        rather than refusing to start, so nothing tells you.";
+
+    if ctx.client == ClientKind::Firedancer {
+        return Outcome::skipped("Firedancer manages its own AF_XDP setup");
+    }
+    let Some(inv) = ctx.inv() else {
+        return Outcome::skipped("no validator yet, so no XDP path to judge the kernel against");
+    };
+    let disabled = inv.has("--no-xdp");
+    let explicit = ["--xdp-interface", "--xdp-cpu-cores", "--xdp-zero-copy"]
+        .iter()
+        .any(|f| inv.has(f));
+    let default_on = ctx.at_least(4, 2);
+    if disabled || !(explicit || default_on) {
+        return Outcome::skipped("XDP not in use, so no kernel floor applies");
+    }
+    let Some((major, minor)) = kernel_version(ctx) else {
+        return Outcome::unknown("cannot read the kernel version").why(WHY);
+    };
+
+    let driver = crate::checks::net::primary_interface(ctx)
+        .and_then(|iface| crate::checks::net::driver_of(ctx, &iface));
+    let (floor, because) = match driver.as_deref() {
+        Some("igb") => (KERNEL_FLOOR_IGB, " because the driver is igb"),
+        _ => (KERNEL_FLOOR, ""),
+    };
+    let expected = format!("kernel {}.{} or newer{because}", floor.0, floor.1);
+    let observed = format!("kernel {major}.{minor}");
+
+    if (major, minor) >= floor {
+        return Outcome::pass(observed, expected).why(WHY);
+    }
+
+    // Below the floor with XDP merely available is a shortfall. Below the floor
+    // with XDP on by default and no --no-xdp means the default path is live on
+    // a kernel that cannot carry it, with nothing to fall back to.
+    let unguarded = default_on && !explicit;
+    let why = match unguarded {
+        true => format!(
+            "{WHY} On this box XDP is on by default, the kernel is below the floor, and the \
+             invocation does not pass --no-xdp, so that path is live with no fallback."
+        ),
+        false => WHY.to_string(),
+    };
+    let fix = match unguarded {
+        true => vec![
+            FixStep::noted(
+                "--no-xdp",
+                "the immediate action: it puts the node back on UDP sockets today",
+            ),
+            FixStep::noted(
+                format!(
+                    "then upgrade the kernel to {}.{} or newer",
+                    floor.0, floor.1
+                ),
+                "the real fix, and on an older distribution that may mean a release upgrade",
+            ),
+        ],
+        false => vec![FixStep::cmd(format!(
+            "upgrade the kernel to {}.{} or newer",
+            floor.0, floor.1
+        ))],
+    };
+    Outcome::fail(observed, expected).why(why).fix(fix)
 }

@@ -153,7 +153,7 @@ pub fn cores(ctx: &Ctx) -> Outcome {
         Some(p) => format!("{p} physical cores, {threads} threads"),
         None => format!("{threads} threads, physical core count not reported"),
     };
-    Outcome::unknown(observed).expected(EXPECTED).why(WHY)
+    Outcome::reported(observed, EXPECTED).why(WHY)
 }
 
 /// PF-HW-0005. RAM. Anza suggests a 512 GB-capable board, which is guidance
@@ -164,8 +164,7 @@ pub fn memory(ctx: &Ctx) -> Outcome {
         list. Operators run testnet on far less. Accounts and index live in memory, so running \
         short shows up as an OOM kill hours into a run rather than at startup, which is why the \
         figure is worth seeing even though nobody will tell you what it should be.";
-    const EXPECTED: &str =
-        "no published minimum; testnet runs on far less than the 512 GB board suggestion";
+    const EXPECTED: &str = "no published minimum for any cluster";
 
     if let Some(o) = needs_linux(ctx, WHY) {
         return o;
@@ -189,7 +188,7 @@ pub fn memory(ctx: &Ctx) -> Outcome {
     // failed a working validator.
     match ctx.profile {
         Profile::Local => Outcome::pass(observed, "enough for a test validator").why(WHY),
-        _ => Outcome::unknown(observed).expected(EXPECTED).why(WHY),
+        _ => Outcome::reported(observed, EXPECTED).why(WHY),
     }
 }
 
@@ -247,8 +246,6 @@ pub fn on_recommended_list(ctx: &Ctx) -> Outcome {
                 "measure your PoH rate before taking stake, and compare against the list",
                 "the listed parts report roughly 14M to 23M hashes per second",
             )]),
-        (None, _) => Outcome::unknown(format!("{model} is not on the list"))
-            .expected(EXPECTED)
-            .why(WHY),
+        (None, _) => Outcome::reported(format!("{model} is not on the list"), EXPECTED).why(WHY),
     }
 }

@@ -276,7 +276,6 @@ fn main() {
         };
         findings.push(Finding {
             id: c.id,
-            reports_only: c.reports_only,
             phase: c.layer.phase(),
             layer: c.layer.label(),
             section: c.layer.human(),

@@ -15,6 +15,10 @@ pub enum Status {
     Unsupported,
     Skipped,
     Unknown,
+    /// Measured successfully, but nobody publishes a threshold to judge it
+    /// against. Distinct from Unknown, which means the probe failed. A run
+    /// full of these is complete, so it must not affect the exit code.
+    Reported,
 }
 
 impl Status {
@@ -26,6 +30,7 @@ impl Status {
             Status::Unsupported => "UNSUPPORTED",
             Status::Skipped => "SKIPPED",
             Status::Unknown => "UNKNOWN",
+            Status::Reported => "REPORTED",
         }
     }
 }
@@ -356,6 +361,11 @@ impl Outcome {
         }
     }
 
+    /// Measured, with no published threshold to compare against.
+    pub fn reported(observed: impl Into<String>, expected: impl Into<String>) -> Self {
+        Outcome::new(Status::Reported, observed, expected)
+    }
+
     pub fn unknown(reason: impl Into<String>) -> Self {
         Outcome {
             observed: reason.into(),
@@ -376,8 +386,6 @@ pub struct Check {
     pub needs_root: bool,
     /// True when the check exists to report a number rather than judge it,
     /// because no minimum is published. Its Unknown is by design, so it must
-    /// not stop the report reaching a verdict.
-    pub reports_only: bool,
     pub source: &'static [Source],
     pub run: RunFn,
 }
@@ -414,8 +422,6 @@ impl Check {
 #[derive(Serialize)]
 pub struct Finding {
     pub id: &'static str,
-    #[serde(skip)]
-    pub reports_only: bool,
     #[serde(skip)]
     pub phase: Phase,
     pub layer: &'static str,

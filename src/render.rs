@@ -28,6 +28,7 @@ impl Style {
             Status::Unsupported => "35",
             Status::Skipped => "90",
             Status::Unknown => "36",
+            Status::Reported => "34",
         };
         format!("\x1b[{c}m{text}\x1b[0m")
     }
@@ -366,16 +367,21 @@ fn phase_block(
         return String::new();
     }
     let count = |s: Status| mine.iter().filter(|f| f.outcome.status == s).count();
-    let fatal = mine
-        .iter()
-        .filter(|f| f.outcome.status == Status::Fail && f.severity == "fatal")
-        .count();
+    let with_severity = |sev: &str| {
+        mine.iter()
+            .filter(|f| f.outcome.status == Status::Fail && f.severity == sev)
+            .count()
+    };
+
+    // A requirement that is not met means the answer is no, whether or not the
+    // validator would still start. Advisories are things worth doing, and they
+    // do not change the answer. Keying the verdict on fatal alone reported a
+    // 1.4 TB storage shortfall as "yes, with things worth fixing".
     let unsupported = count(Status::Unsupported);
-    let other = count(Status::Fail) - fatal + count(Status::Ephemeral);
-    let unknown = mine
-        .iter()
-        .filter(|f| f.outcome.status == Status::Unknown && !f.reports_only)
-        .count();
+    let fatal = with_severity("fatal");
+    let unmet = fatal + with_severity("degraded") + count(Status::Ephemeral);
+    let advisory = with_severity("advisory");
+    let unknown = count(Status::Unknown);
     let ran = mine.len() - count(Status::Skipped);
 
     // When the reason is the operating system, say that rather than a count.
@@ -402,18 +408,22 @@ fn phase_block(
         );
     }
 
-    let verdict = match (ran, unsupported, fatal, other, unknown) {
+    let verdict = match (ran, unsupported, unmet, advisory, unknown) {
         (0, ..) if phase == Phase::Validator => "no validator installed, nothing to check".into(),
         (0, ..) => "nothing applied to this host".into(),
         (_, u, ..) if u > 0 => format!(
             "no. {u} requirement{} cannot be met on this hardware",
             plural(u, "", "s")
         ),
-        (_, _, f, _, _) if f > 0 => {
-            format!("no. {f} thing{} must be fixed first", plural(f, "", "s"))
+        (_, _, m, a, _) if m > 0 => {
+            let tail = match a {
+                0 => String::new(),
+                n => format!(", and {n} thing{} worth fixing", plural(n, "", "s")),
+            };
+            format!("no. {m} requirement{} not met{tail}", plural(m, "", "s"))
         }
-        (_, _, _, o, _) if o > 0 => {
-            format!("yes, with {o} thing{} worth fixing", plural(o, "", "s"))
+        (_, _, _, a, _) if a > 0 => {
+            format!("yes, with {a} thing{} worth fixing", plural(a, "", "s"))
         }
         (_, _, _, _, u) if u > 0 => format!(
             "cannot say. {u} thing{} could not be read",
@@ -471,6 +481,7 @@ fn summary(ctx: &Ctx, findings: &[Finding], st: &Style) -> String {
         Status::Unsupported,
         Status::Ephemeral,
         Status::Unknown,
+        Status::Reported,
         Status::Pass,
     ] {
         if n(s) > 0 {
@@ -530,25 +541,30 @@ fn summary(ctx: &Ctx, findings: &[Finding], st: &Style) -> String {
         );
     }
 
+    // Startup and capability are different claims, so the closing line says
+    // which one it is talking about rather than reaching for "blocks startup".
     let fatal: Vec<&str> = findings
         .iter()
         .filter(|f| f.outcome.status == Status::Fail && f.severity == "fatal")
         .map(|f| f.id)
         .collect();
-    let other = findings
+    let unmet = findings
         .iter()
-        .filter(|f| f.outcome.status == Status::Fail && f.severity != "fatal")
+        .filter(|f| f.outcome.status == Status::Fail && f.severity == "degraded")
+        .count();
+    let advisory = findings
+        .iter()
+        .filter(|f| f.outcome.status == Status::Fail && f.severity == "advisory")
         .count();
 
     if !fatal.is_empty() {
         line.push_str(&format!(
             "\nnext      {} stop{} the validator from starting: {}\n",
-            if fatal.len() == 1 {
-                "1 fatal finding".into()
-            } else {
-                format!("{} fatal findings", fatal.len())
+            match fatal.len() {
+                1 => "1 finding".to_string(),
+                n => format!("{n} findings"),
             },
-            if fatal.len() == 1 { "s" } else { "" },
+            plural(fatal.len(), "s", ""),
             fatal.join(", ")
         ));
         line.push_str(plural(
@@ -556,18 +572,26 @@ fn summary(ctx: &Ctx, findings: &[Finding], st: &Style) -> String {
             "          fix that first, then re-run\n",
             "          fix those first, then re-run\n",
         ));
-        if other > 0 {
+        if unmet + advisory > 0 {
             line.push_str(&st.dim(&format!(
-                "          the other {other} {} drift: the node runs, but not as configured\n",
-                plural(other, "is", "are")
+                "          the other {} {} not stop it, but leave the node short\n",
+                unmet + advisory,
+                plural(unmet + advisory, "does", "do")
             )));
         }
-    } else if other > 0 {
+    } else if unmet > 0 {
         line.push_str(&format!(
-            "\nnext      nothing blocks startup; {other} finding{} mean the node runs but not as configured\n",
-            plural(other, "", "s")
+            "\nnext      the validator will start. {unmet} requirement{} not met, so it runs\n\
+             \x20         short of what it should be\n",
+            plural(unmet, " is", "s are")
+        ));
+    } else if advisory > 0 {
+        line.push_str(&format!(
+            "\nnext      nothing is wrong. {advisory} thing{} worth doing\n",
+            plural(advisory, " is", "s are")
         ));
     }
+
     if findings.iter().any(|f| f.outcome.status == Status::Fail) {
         line.push_str(&st.dim("          preflight explain <id>  for one finding on its own\n"));
     }

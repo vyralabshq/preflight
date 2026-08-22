@@ -81,7 +81,7 @@ pub static CHECKS: &[Check] = &[
         id: "PF-FS-0001",
         layer: Layer::Fs,
         severity: Degraded,
-        title: "Storage against Anza's published sizes",
+        title: "Storage capacity and headroom",
         profiles: &[Testnet, Mainnet],
         clients: ANY_CLIENT,
         needs_root: false,

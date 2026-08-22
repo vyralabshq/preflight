@@ -103,6 +103,9 @@ pub fn base_clock(ctx: &Ctx) -> Outcome {
         .and_then(|l| l.split(':').nth(1))
         .map(str::trim)
         .unwrap_or("unknown CPU");
+    let Some(want) = ctx.profile.thresholds().base_clock_mhz else {
+        return Outcome::skipped("no clock requirement for this profile");
+    };
     let mhz = info
         .lines()
         .find(|l| l.starts_with("cpu MHz"))
@@ -111,7 +114,7 @@ pub fn base_clock(ctx: &Ctx) -> Outcome {
     // Anza states 2.8 GHz; below that is a finding, not a preference.
     match mhz {
         None => Outcome::unknown(format!("{model}: no cpu MHz reported")).why(WHY),
-        Some(m) if m >= 2800.0 => {
+        Some(m) if m >= want => {
             Outcome::pass(format!("{model} at {:.0} MHz", m), EXPECTED).why(WHY)
         }
         Some(m) => Outcome::fail(format!("{model} at {:.0} MHz", m),

@@ -33,11 +33,8 @@ pub const S_DIO: &[Source] = &[Source {
     provisional: false,
 }];
 
-/// Anza's stated sizes: accounts 1 TB, ledger 1 TB, snapshots 500 GB.
-const NEED_ACCOUNTS_GB: f64 = 1000.0;
-const NEED_LEDGER_GB: f64 = 1000.0;
-const NEED_SNAPSHOTS_GB: f64 = 500.0;
-const NEED_TOTAL_GB: f64 = NEED_ACCOUNTS_GB + NEED_LEDGER_GB + NEED_SNAPSHOTS_GB;
+/// Anza's stated sizes, used as the mainnet baseline. See Profile::thresholds.
+const NEED_TOTAL_GB: f64 = 2500.0;
 
 const NETWORK_FS: &[&str] = &["nfs", "nfs4", "cifs", "smb3", "ceph", "glusterfs", "9p"];
 const NO_ODIRECT: &[&str] = &["tmpfs", "zfs", "overlay", "nfs", "nfs4", "cifs", "9p"];
@@ -130,98 +127,115 @@ fn unwrap_all(v: Vec<Result<String, String>>) -> Vec<String> {
     v.into_iter().map(|r| r.unwrap_or_else(|e| e)).collect()
 }
 
-/// PF-FS-0001. Enough storage, and where it has to go.
+/// PF-FS-0001. Storage, judged against the active profile.
+///
+/// mainnet gets Anza's figures. testnet and local have no published figures, so
+/// they are judged on free headroom instead, which is the thing that actually
+/// takes a node down.
 pub fn capacity(ctx: &Ctx) -> Outcome {
-    const WHY: &str = "Anza gives one set of figures and does not say which cluster they are \
-        for: accounts 1 TB, ledger 1 TB, snapshots 500 GB, all high write endurance. Operators \
-        run testnet on considerably less. preflight reports the comparison rather than failing a \
-        box against numbers that were never labelled testnet. What does bite is running out \
-        partway through a snapshot download, or weeks later as the ledger grows.";
-    let expected = format!("about {NEED_TOTAL_GB:.0} GB across the validator's paths");
+    const WHY_SIZED: &str = "Anza gives one set of figures without saying which cluster they are \
+        for: accounts 1 TB, ledger 1 TB, snapshots 500 GB, all high write endurance. They \
+        describe a production node, so preflight applies them to mainnet.";
+    const WHY_HEADROOM: &str = "Nobody publishes storage figures for this cluster, and operators \
+        run it on far less than Anza's production numbers, so preflight does not judge you \
+        against a size. What does take a node down is running out: partway through a snapshot \
+        download, or weeks later as the ledger grows. So this checks headroom instead.";
 
-    if let Some(o) = needs_linux(ctx, WHY) {
+    if let Some(o) = needs_linux(ctx, WHY_HEADROOM) {
         return o;
     }
+    let t = ctx.profile.thresholds();
     let all = mounts(ctx);
     let paths = validator_paths(ctx);
 
     if paths.is_empty() {
-        // No validator yet: judge the machine on the storage it has.
-        let usable: f64 = ctx
-            .facts
-            .disks
-            .iter()
-            .filter(|d| !d.rotational)
-            .map(|d| d.size_gb)
-            .sum();
-        let spinning: f64 = ctx
-            .facts
-            .disks
-            .iter()
-            .filter(|d| d.rotational)
-            .map(|d| d.size_gb)
-            .sum();
-        if ctx.facts.disks.is_empty() {
-            return Outcome::unknown("no block devices detected")
-                .expected(expected)
-                .why(WHY);
-        }
-        let observed = format!(
-            "{:.0} GB across {} solid-state device(s){}",
-            usable,
-            ctx.facts.disks.iter().filter(|d| !d.rotational).count(),
-            if spinning > 0.0 {
-                format!(", plus {spinning:.0} GB spinning")
-            } else {
-                String::new()
-            }
-        );
-        if usable >= NEED_TOTAL_GB {
-            return Outcome::pass(observed, expected).why(WHY);
-        }
-        return Outcome::fail(observed, expected).why(WHY).fix(vec![FixStep::noted(
-            format!(
-                "add storage: accounts {NEED_ACCOUNTS_GB:.0} GB, ledger {NEED_LEDGER_GB:.0} GB, snapshots {NEED_SNAPSHOTS_GB:.0} GB"
-            ),
-            "high write endurance matters as much as size; validators write constantly",
-        )]);
+        return bare_box_capacity(ctx, t.accounts_gb.is_some(), WHY_SIZED, WHY_HEADROOM);
     }
+
+    let want = |label: &str| match label {
+        "accounts" => t.accounts_gb,
+        "ledger" => t.ledger_gb,
+        _ => t.snapshots_gb,
+    };
 
     let mut short = Vec::new();
     let mut seen = Vec::new();
     for (label, path) in &paths {
-        let need = match *label {
-            "accounts" => NEED_ACCOUNTS_GB,
-            "ledger" => NEED_LEDGER_GB,
-            _ => NEED_SNAPSHOTS_GB,
-        };
         let Some(m) = mount_for(&all, path) else {
             short.push(format!("{label} {path}: no mount found"));
             continue;
         };
-        let free = ctx
-            .facts
-            .mounts
-            .iter()
-            .find(|x| x.target == m.target)
-            .and_then(|x| x.free_gb);
-        match free {
-            Some(g) if g < need => short.push(format!(
-                "{label} {path}: {g:.0} GB free, wants {need:.0} GB"
+        let facts = ctx.facts.mounts.iter().find(|x| x.target == m.target);
+        let Some(free) = facts.and_then(|x| x.free_gb) else {
+            seen.push(format!("{label} free space not measured"));
+            continue;
+        };
+        let total = facts.and_then(|x| x.total_gb).unwrap_or(0.0);
+        let ratio = match total > 0.0 {
+            true => free / total,
+            false => 1.0,
+        };
+        match want(label) {
+            Some(need) if free < need => short.push(format!(
+                "{label} {path}: {free:.0} GB free, wants {need:.0} GB"
             )),
-            Some(g) => seen.push(format!("{label} {g:.0} GB free")),
-            None => seen.push(format!("{label} free space not measured")),
+            _ if ratio < t.min_free => short.push(format!(
+                "{label} {path}: {free:.0} GB free of {total:.0} GB, under {:.0}% headroom",
+                t.min_free * 100.0
+            )),
+            _ => seen.push(format!("{label} {free:.0} GB free")),
         }
     }
+
+    let why = match t.accounts_gb.is_some() {
+        true => WHY_SIZED,
+        false => WHY_HEADROOM,
+    };
+    let expected = match t.accounts_gb {
+        Some(_) => format!("about {NEED_TOTAL_GB:.0} GB across the validator's paths"),
+        None => format!("at least {:.0}% free on each path", t.min_free * 100.0),
+    };
     if short.is_empty() {
-        return Outcome::pass(seen.join(", "), expected).why(WHY);
+        return Outcome::pass(seen.join(", "), expected).why(why);
     }
-    Outcome::fail(short.join("; "), expected)
-        .why(WHY)
-        .fix(vec![FixStep::noted(
-            "compare these against how much your cluster actually uses",
-            "operators run testnet well below Anza's figures; mainnet is where they bite",
-        )])
+    Outcome::fail(short.join("; "), expected).why(why)
+}
+
+/// No validator yet, so judge the devices rather than any path.
+fn bare_box_capacity(ctx: &Ctx, sized: bool, why_sized: &str, why_headroom: &str) -> Outcome {
+    let why = match sized {
+        true => why_sized,
+        false => why_headroom,
+    };
+    let expected = match sized {
+        true => format!("about {NEED_TOTAL_GB:.0} GB, Anza's figures for a production node"),
+        false => "no published figure for this cluster; reported for your judgement".to_string(),
+    };
+    if ctx.facts.disks.is_empty() {
+        return Outcome::unknown("no block devices detected")
+            .expected(expected)
+            .why(why);
+    }
+    let usable: f64 = ctx
+        .facts
+        .disks
+        .iter()
+        .filter(|d| !d.rotational)
+        .map(|d| d.size_gb)
+        .sum();
+    let observed = format!(
+        "{usable:.0} GB across {} solid-state device(s)",
+        ctx.facts.disks.iter().filter(|d| !d.rotational).count()
+    );
+    match sized && usable < NEED_TOTAL_GB {
+        true => Outcome::fail(observed, expected)
+            .why(why)
+            .fix(vec![FixStep::noted(
+                "accounts 1000 GB, ledger 1000 GB, snapshots 500 GB",
+                "high write endurance matters as much as size; validators write constantly",
+            )]),
+        false => Outcome::pass(observed, expected).why(why),
+    }
 }
 
 /// PF-FS-0002. Separate devices. Degraded, never Fatal: Anza permits sharing.

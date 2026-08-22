@@ -1682,3 +1682,45 @@ fn the_closing_line_leads_with_the_machine() {
         "{o}"
     );
 }
+
+/// Severity is what a finding costs when it fails. REPORTED cannot fail, so
+/// printing one next to it reads as a verdict that was never reached.
+#[test]
+fn reported_findings_carry_no_severity() {
+    let (o, _) = run(&[
+        "--root",
+        &host(&WRAPPER_SCRIPT_UNIT),
+        "--client",
+        "agave-validator@4.2.1",
+        "-v",
+    ]);
+    for line in o.lines().filter(|l| l.contains("REPORTED")) {
+        for sev in ["fatal", "degraded", "advisory"] {
+            assert!(!line.contains(sev), "REPORTED needs no severity: {line}");
+        }
+        assert_eq!(line, line.trim_end(), "no trailing space: {line:?}");
+    }
+}
+
+/// The headroom figure is preflight's own. Citing Anza for it would be the
+/// same invention the storage check refuses to make about sizes.
+#[test]
+fn the_headroom_figure_is_not_cited_to_anza() {
+    let (o, _) = run(&[
+        "--root",
+        &host(&WRAPPER_SCRIPT_UNIT),
+        "--client",
+        "agave-validator@4.2.1",
+        "-v",
+    ]);
+    let block = block_for(&o, "PF-FS-0001");
+    assert!(flat(block).contains("no published figure"), "{block}");
+    assert!(
+        flat(block).contains("preflight's own line, not anybody's published requirement"),
+        "{block}"
+    );
+    assert!(
+        flat(block).contains("headroom figure is preflight's own"),
+        "the source must say so too:\n{block}"
+    );
+}

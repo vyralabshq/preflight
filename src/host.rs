@@ -79,6 +79,7 @@ pub struct Mount {
     pub target: String,
     pub fstype: String,
     pub free_gb: Option<f64>,
+    pub total_gb: Option<f64>,
 }
 
 fn field<'a>(text: &'a str, key: &str) -> Option<&'a str> {
@@ -158,10 +159,12 @@ pub fn gather(fs: &Rootfs) -> Facts {
             if noise {
                 continue;
             }
+            let (free, total) = space_gb(fs, target);
             f.mounts.push(Mount {
                 target: target.to_string(),
                 fstype: fstype.to_string(),
-                free_gb: free_space_gb(fs, target),
+                free_gb: free,
+                total_gb: total,
             });
         }
     }
@@ -170,7 +173,16 @@ pub fn gather(fs: &Rootfs) -> Facts {
 
 /// statvfs on the real host only. Under --root the numbers would describe the
 /// machine running preflight, not the machine being reported on.
-fn free_space_gb(fs: &Rootfs, target: &str) -> Option<f64> {
+fn space_gb(fs: &Rootfs, target: &str) -> (Option<f64>, Option<f64>) {
+    match statvfs_gb(fs, target) {
+        Some((free, total)) => (Some(free), Some(total)),
+        None => (None, None),
+    }
+}
+
+/// Free and total gigabytes, on the real host only. Under --root the numbers
+/// would describe the machine running preflight, not the one being reported on.
+fn statvfs_gb(fs: &Rootfs, target: &str) -> Option<(f64, f64)> {
     if fs.is_prefixed() {
         return None;
     }
@@ -193,7 +205,10 @@ fn free_space_gb(fs: &Rootfs, target: &str) -> Option<f64> {
     if rc != 0 || s.f_frsize == 0 {
         return None;
     }
-    Some(s.f_bavail as f64 * s.f_frsize as f64 / 1e9)
+    Some((
+        s.f_bavail as f64 * s.f_frsize as f64 / 1e9,
+        s.f_blocks as f64 * s.f_frsize as f64 / 1e9,
+    ))
 }
 
 /// A client version, parsed only as far as checks need it.

@@ -20,7 +20,7 @@ test:
 ## run preflight against this machine
 check:
 	@cargo run --quiet -- $(ARGS); c=$$?; echo; echo "exit code $$c"; \
-	  [ $$c -eq 3 ] && exit 3 || exit 0
+	  exit $$c
 
 ## print every check and where its requirement comes from
 registry:

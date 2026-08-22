@@ -56,14 +56,14 @@ const NEED_TOTAL_GB: f64 = 2500.0;
 const NETWORK_FS: &[&str] = &["nfs", "nfs4", "cifs", "smb3", "ceph", "glusterfs", "9p"];
 const NO_ODIRECT: &[&str] = &["tmpfs", "zfs", "overlay", "nfs", "nfs4", "cifs", "9p"];
 
-struct MountInfo {
-    target: String,
-    source: String,
-    fstype: String,
-    options: String,
+pub struct MountInfo {
+    pub target: String,
+    pub source: String,
+    pub fstype: String,
+    pub options: String,
 }
 
-fn mounts(ctx: &Ctx) -> Vec<MountInfo> {
+pub fn mounts(ctx: &Ctx) -> Vec<MountInfo> {
     let Ok(text) = ctx.fs.read("/proc/mounts") else {
         return Vec::new();
     };
@@ -81,7 +81,9 @@ fn mounts(ctx: &Ctx) -> Vec<MountInfo> {
 }
 
 /// The mount that actually holds a path: the longest matching mount point.
-fn mount_for<'a>(all: &'a [MountInfo], path: &str) -> Option<&'a MountInfo> {
+/// Longest mount whose target contains the path, on a slash boundary so
+/// /mnt/accounts-old never matches /mnt/accounts. Shared with the ARG layer.
+pub fn mount_for<'a>(all: &'a [MountInfo], path: &str) -> Option<&'a MountInfo> {
     all.iter()
         .filter(|m| {
             path == m.target
@@ -158,12 +160,12 @@ pub fn capacity(ctx: &Ctx) -> Outcome {
     const WHY_SIZED: &str = "Anza gives one set of figures without saying which cluster they are \
         for: accounts 1 TB, ledger 1 TB, snapshots 500 GB, all high write endurance. They \
         describe a production node, so preflight applies them to mainnet.";
-    const WHY_HEADROOM: &str = "Nobody publishes storage figures for this cluster, and operators \
-        run it on far less than Anza's production numbers, so preflight does not judge you \
-        against a size. What does take a node down is running out: partway through a snapshot \
-        download, or weeks later as the ledger grows. The headroom figure below is preflight's \
-        own line, not anybody's published requirement, and a one-shot check sees a level rather \
-        than a rate, so treat it as a prompt to look at your own trend.";
+    const WHY_HEADROOM: &str = "Anza publishes no storage figures for this cluster, so the ledger \
+        floor below is an operator one from running it, not anybody's published requirement: \
+        250 GB carries testnet where mainnet wants Anza's 1 TB. What takes a node down is running \
+        out, either partway through a snapshot download or weeks later as the ledger grows, and a \
+        one-shot check sees a level rather than a rate, so treat the headroom line as a prompt to \
+        look at your own trend.";
 
     if let Some(o) = needs_linux(ctx, WHY_HEADROOM) {
         return o;
@@ -178,7 +180,8 @@ pub fn capacity(ctx: &Ctx) -> Outcome {
 
     let want = |label: &str| match label {
         "accounts" => t.accounts_gb,
-        "ledger" => t.ledger_gb,
+        // Anza's figure where there is one, the operator floor where there is not.
+        "ledger" => t.ledger_gb.or(t.disk_gb),
         _ => t.snapshots_gb,
     };
 

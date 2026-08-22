@@ -52,7 +52,10 @@ fn sysctl(ctx: &Ctx, key: &str) -> Option<i64> {
 }
 
 /// Look for a file that would restore the value after a reboot.
-fn persisted_in(ctx: &Ctx, key: &str) -> Option<String> {
+/// Returns the file only when it sets the key to something adequate. A file
+/// naming the key with a number below what is wanted does not persist anything
+/// worth having: the reboot restores the wrong value, quietly.
+fn persisted_in(ctx: &Ctx, key: &str, want: i64) -> Option<String> {
     let mut files: Vec<std::path::PathBuf> = ctx.fs.list("/etc/sysctl.d");
     files.push(ctx.fs.at("/etc/sysctl.conf"));
     for f in files {
@@ -64,7 +67,13 @@ fn persisted_in(ctx: &Ctx, key: &str) -> Option<String> {
             if line.starts_with('#') {
                 continue;
             }
-            if line.split('=').next().is_some_and(|k| k.trim() == key) {
+            let Some((k, v)) = line.split_once('=') else {
+                continue;
+            };
+            if k.trim() != key {
+                continue;
+            }
+            if v.trim().parse::<i64>().is_ok_and(|n| n >= want) {
                 return Some(f.display().to_string());
             }
         }
@@ -96,7 +105,7 @@ fn check_value(
             )]);
     };
 
-    let persisted = persisted_in(ctx, key);
+    let persisted = persisted_in(ctx, key, want);
     let fix = vec![
         FixStep::cmd(format!("echo '{key} = {want}' | sudo tee -a {SYSCTL_FILE}")),
         FixStep::noted(
@@ -123,8 +132,8 @@ fn check_value(
                 found: Some(f),
                 expected: SYSCTL_FILE.to_string(),
             }),
-        None if actual == kernel_default => Outcome::pass(
-            format!("{key} = {actual}, which is the kernel default and already adequate"),
+        None if actual <= kernel_default => Outcome::pass(
+            format!("{key} = {actual}, which is the stock value and already adequate"),
             expected,
         )
         .why(why),

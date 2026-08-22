@@ -153,6 +153,27 @@ fn require_invocation(ctx: &Ctx) -> Result<&Invocation, Box<Outcome>> {
     if !ctx.validator_present {
         return Err(Box::new(Outcome::skipped("no validator on this host")));
     }
+    // A bare $FLAGS leaves no flags to read, which is not the same as no flags
+    // set. Passing thirteen checks off an unexpanded token is the worst answer
+    // this layer can give.
+    if let Some(inv) = ctx.inv()
+        && let Some(tok) = inv.unresolved.iter().find(|t| !t.starts_with('-'))
+    {
+        return Err(Box::new(
+            Outcome::unknown(format!(
+                "the command line still contains {tok}, so preflight never saw the real flags"
+            ))
+            .expected("a command line with every token expanded")
+            .why(
+                "preflight reads the invocation as text and does not run a shell, so a variable \
+                 the shell would expand stays literal here. An unexpanded token that is not \
+                 itself a flag could hold any number of arguments, and treating what is left as \
+                 the whole command line would report every check in this layer as passing on \
+                 flags nobody read.",
+            )
+            .verify("tr '\\0' ' ' < /proc/$(pgrep -n agave-validator)/cmdline"),
+        ));
+    }
     ctx.inv().ok_or_else(|| {
         Box::new(
             Outcome::unknown(format!(
@@ -199,20 +220,20 @@ fn require_version(ctx: &Ctx, major: u64, minor: u64) -> Result<(), Box<Outcome>
 /// The file an operator edits and the service they restart, both resolved
 /// during invocation lookup. Without this a fix says "edit the unit or wrapper
 /// script", which is the exact thing preflight just worked out for them.
-fn edit_steps(ctx: &Ctx, change: impl Into<String>, note: Option<&str>) -> Vec<FixStep> {
-    let mut steps = Vec::new();
-    match ctx.inv().and_then(|i| i.edit_target.clone()) {
-        Some(f) => steps.push(FixStep::cmd(format!("edit {f}"))),
-        None => steps.push(FixStep::noted(
+/// Every fix in this layer is the same three moves: open the file that holds
+/// the command line, change something in it, restart the unit that runs it.
+fn edit_steps(ctx: &Ctx, changes: Vec<FixStep>) -> Vec<FixStep> {
+    let mut steps = vec![match ctx.inv().and_then(|i| i.edit_target.clone()) {
+        Some(f) => FixStep::cmd(format!("edit {f}")),
+        None => FixStep::noted(
             "edit your validator command line",
             "preflight could not resolve which file holds it; see the trail in the header",
-        )),
-    }
-    let change = change.into();
-    steps.push(match note {
-        Some(n) => FixStep::noted(format!("  {change}"), n),
-        None => FixStep::cmd(format!("  {change}")),
-    });
+        ),
+    }];
+    steps.extend(changes.into_iter().map(|c| FixStep {
+        command: format!("  {}", c.command),
+        note: c.note,
+    }));
     if let Some(u) = ctx.inv().and_then(|i| i.unit_name.clone()) {
         steps.push(FixStep::cmd(format!("sudo systemctl restart {u}")));
     }
@@ -230,21 +251,6 @@ fn edit_target_or(ctx: &Ctx) -> String {
 /// a host that uses a different one hands the operator a command that silently
 /// targets nothing.
 /// The edit-this-file wrapper around a single rename step.
-fn rename_steps(ctx: &Ctx, step: FixStep) -> Vec<FixStep> {
-    let mut steps = match ctx.inv().and_then(|i| i.edit_target.clone()) {
-        Some(f) => vec![FixStep::cmd(format!("edit {f}"))],
-        None => vec![FixStep::cmd("edit your validator command line")],
-    };
-    steps.push(FixStep {
-        command: format!("  {}", step.command),
-        note: step.note,
-    });
-    if let Some(u) = ctx.inv().and_then(|i| i.unit_name.clone()) {
-        steps.push(FixStep::cmd(format!("sudo systemctl restart {u}")));
-    }
-    steps
-}
-
 fn unit_or_placeholder(ctx: &Ctx) -> String {
     ctx.inv()
         .and_then(|i| i.unit_name.clone())
@@ -281,17 +287,7 @@ fn deprecated(
     if found.is_empty() {
         return Outcome::pass("none present", expected).why(why);
     }
-    let mut steps = Vec::new();
-    match ctx.inv().and_then(|i| i.edit_target.clone()) {
-        Some(f) => steps.push(FixStep::cmd(format!("edit {f}"))),
-        None => steps.push(FixStep::cmd("edit your validator command line")),
-    }
-    for c in changes {
-        steps.push(FixStep::cmd(format!("  {c}")));
-    }
-    if let Some(u) = ctx.inv().and_then(|i| i.unit_name.clone()) {
-        steps.push(FixStep::cmd(format!("sudo systemctl restart {u}")));
-    }
+    let steps = edit_steps(ctx, changes.into_iter().map(FixStep::cmd).collect());
     Outcome::fail(format!("present: {}", found.join(", ")), expected)
         .why(why)
         .fix(steps)
@@ -348,8 +344,10 @@ pub fn port_range(ctx: &Ctx) -> Outcome {
     .why(WHY)
     .fix(edit_steps(
         ctx,
-        format!("--dynamic-port-range {raw}   ->   {start}-{}", start + 30),
-        Some("30 leaves headroom above the 26 required"),
+        vec![FixStep::noted(
+            format!("--dynamic-port-range {raw}   ->   {start}-{}", start + 30),
+            "30 leaves headroom above the 26 required",
+        )],
     ))
     .verify(format!(
         "grep -- --dynamic-port-range {}",
@@ -376,8 +374,10 @@ pub fn private_addr_xdp(ctx: &Ctx) -> Outcome {
         .why(WHY)
         .fix(edit_steps(
             ctx,
-            "add --no-xdp",
-            Some("alongside --allow-private-addr"),
+            vec![FixStep::noted(
+                "add --no-xdp",
+                "alongside --allow-private-addr",
+            )],
         ))
 }
 
@@ -418,8 +418,9 @@ pub fn block_verification_method(ctx: &Ctx) -> Outcome {
                 .why(WHY)
                 .fix(edit_steps(
                     ctx,
-                    "--block-verification-method blockstore-processor   ->   unified-scheduler",
-                    None,
+                    vec![FixStep::cmd(
+                        "--block-verification-method blockstore-processor   ->   unified-scheduler",
+                    )],
                 ))
         }
         Some(other) => {
@@ -442,19 +443,21 @@ pub fn block_production_method(ctx: &Ctx) -> Outcome {
 
     let inv = gate!(ctx, 4, 1, WHY);
     match inv.value("--block-production-method").as_deref() {
-        Some("central-scheduler") => {
-            Outcome::fail("--block-production-method central-scheduler", EXPECTED)
-                .why(WHY)
-                .fix(edit_steps(
-                    ctx,
-                    "--block-production-method central-scheduler   ->   central-scheduler-greedy",
-                    None,
-                ))
-                .verify(format!(
-                    "journalctl -u {} -n 200 | grep -i central-scheduler",
-                    unit_or_placeholder(ctx)
-                ))
-        }
+        Some("central-scheduler") => Outcome::fail(
+            "--block-production-method central-scheduler",
+            EXPECTED,
+        )
+        .why(WHY)
+        .fix(edit_steps(
+            ctx,
+            vec![FixStep::cmd(
+                "--block-production-method central-scheduler   ->   central-scheduler-greedy",
+            )],
+        ))
+        .verify(format!(
+            "journalctl -u {} -n 200 | grep -i central-scheduler",
+            unit_or_placeholder(ctx)
+        )),
         Some(other) => {
             Outcome::pass(format!("--block-production-method {other}"), EXPECTED).why(WHY)
         }
@@ -582,11 +585,7 @@ pub fn accounts_index_limit(ctx: &Ctx) -> Outcome {
     match inv.value("--accounts-index-limit").as_deref() {
         Some("minimal") => Outcome::fail("--accounts-index-limit minimal", EXPECTED)
             .why(WHY)
-            .fix(edit_steps(
-                ctx,
-                "--accounts-index-limit minimal   ->   --accounts-index-limit <size>",
-                Some("pick a size for your box; 'minimal' does not mean the same thing across releases"),
-            )),
+            .fix(edit_steps(ctx, vec![FixStep::noted("--accounts-index-limit minimal   ->   --accounts-index-limit <size>", "pick a size for your box; 'minimal' does not mean the same thing across releases")])),
         Some(other) => Outcome::pass(format!("--accounts-index-limit {other}"), EXPECTED).why(WHY),
         None => Outcome::pass("not set", EXPECTED).why(WHY),
     }
@@ -610,47 +609,43 @@ pub fn direct_io(ctx: &Ctx) -> Outcome {
         )
         .why(WHY);
     };
-    let Ok(mounts) = ctx.fs.read("/proc/mounts") else {
+    let all = crate::checks::fs::mounts(ctx);
+    if all.is_empty() {
         return Outcome::unknown(
             "cannot read /proc/mounts: this check needs a Linux host, or --root pointed at one",
         )
         .why(WHY);
-    };
-    let mut best = ("", "");
-    for line in mounts.lines() {
-        let f: Vec<&str> = line.split_whitespace().collect();
-        if f.len() >= 3 && accounts.starts_with(f[1]) && f[1].len() >= best.0.len() {
-            best = (f[1], f[2]);
-        }
     }
-    if best.0.is_empty() {
+    let Some(best) = crate::checks::fs::mount_for(&all, &accounts) else {
         return Outcome::unknown(format!("no mount found for {accounts}")).why(WHY);
-    }
-    let no_odirect = matches!(best.1, "tmpfs" | "zfs" | "nfs" | "nfs4" | "overlay");
+    };
+    let no_odirect = matches!(
+        best.fstype.as_str(),
+        "tmpfs" | "zfs" | "nfs" | "nfs4" | "overlay"
+    );
     match (no_odirect, opted_out) {
         (true, false) => Outcome::fail(
             format!(
                 "{accounts} is on {} ({}), --no-accounts-db-snapshots-direct-io absent",
-                best.0, best.1
+                best.target, best.fstype
             ),
             EXPECTED,
         )
         .why(WHY)
         .fix(edit_steps(
             ctx,
-            "add --no-accounts-db-snapshots-direct-io",
-            None,
+            vec![FixStep::cmd("add --no-accounts-db-snapshots-direct-io")],
         )),
         (false, true) => Outcome::pass(
             format!(
                 "opted out of direct I/O on {} ({}), which does support O_DIRECT",
-                best.0, best.1
+                best.target, best.fstype
             ),
             EXPECTED,
         )
         .why(WHY),
         _ => Outcome::pass(
-            format!("{} is {}, setting is consistent", best.0, best.1),
+            format!("{} is {}, setting is consistent", best.target, best.fstype),
             EXPECTED,
         )
         .why(WHY),
@@ -689,9 +684,9 @@ pub fn limit_ledger_size(ctx: &Ctx) -> Outcome {
                     "{WHY} You set {n}, which counted data shreds only, so about {doubled} keeps \
                      the same history under the flag that counts both."
                 ))
-                .fix(rename_steps(
+                .fix(edit_steps(
                     ctx,
-                    FixStep::rename(
+                    vec![FixStep::rename(
                         "--limit-ledger-size",
                         "--limit-blockstore-size",
                         Some(&n),
@@ -699,7 +694,7 @@ pub fn limit_ledger_size(ctx: &Ctx) -> Outcome {
                             "the new flag counts coding shreds too, so roughly double it; a \
                              starting point, not a conversion",
                         ),
-                    ),
+                    )],
                 ))
         }
         None => Outcome::fail("--limit-ledger-size, with no value", EXPECTED)
@@ -709,14 +704,14 @@ pub fn limit_ledger_size(ctx: &Ctx) -> Outcome {
                  DEFAULT_MAX_BLOCKSTORE_SHREDS is 400,000,000 data and coding shreds, so the \
                  rename keeps the same retention with nothing to convert."
             ))
-            .fix(rename_steps(
+            .fix(edit_steps(
                 ctx,
-                FixStep::rename(
+                vec![FixStep::rename(
                     "--limit-ledger-size",
                     "--limit-blockstore-size",
                     None,
                     ValueCarry::NoValueSet,
-                ),
+                )],
             )),
     }
 }
@@ -739,8 +734,10 @@ pub fn disable_banking_trace(ctx: &Ctx) -> Outcome {
         .why(WHY)
         .fix(edit_steps(
             ctx,
-            "remove --disable-banking-trace",
-            Some("to enable tracing instead, pass --enable-banking-trace <max bytes>"),
+            vec![FixStep::noted(
+                "remove --disable-banking-trace",
+                "to enable tracing instead, pass --enable-banking-trace <max bytes>",
+            )],
         ))
 }
 
@@ -758,5 +755,8 @@ pub fn tpu_connection_pool_size(ctx: &Ctx) -> Outcome {
     }
     Outcome::fail("--tpu-connection-pool-size present", EXPECTED)
         .why(WHY)
-        .fix(edit_steps(ctx, "remove --tpu-connection-pool-size", None))
+        .fix(edit_steps(
+            ctx,
+            vec![FixStep::cmd("remove --tpu-connection-pool-size")],
+        ))
 }

@@ -21,6 +21,23 @@ pub const S_REQ: &[Source] = &[Source {
 /// The community hardware list, which records what operators actually run and
 /// what PoH rate each part reaches. Anza publishes no core or memory minimum,
 /// so this is the closest thing to evidence.
+/// Figures nobody publishes, carried as what they are: an operator floor from
+/// running these clusters, never dressed up as Anza's.
+pub const S_FLOOR: &[Source] = &[
+    Source {
+        kind: Operator,
+        locator: "operator floor, not published by Anza",
+        verified_against: "2026-08",
+        provisional: false,
+    },
+    Source {
+        kind: Operator,
+        locator: "solanahcl.org, agave CPU list",
+        verified_against: "2026-08",
+        provisional: false,
+    },
+];
+
 pub const S_HCL: &[Source] = &[Source {
     kind: Operator,
     locator: "solanahcl.org, agave CPU list",
@@ -88,8 +105,10 @@ pub fn avx2(ctx: &Ctx) -> Outcome {
 pub fn base_clock(ctx: &Ctx) -> Outcome {
     const WHY: &str = "Anza's stated requirement is a 2.8 GHz base clock or faster, and the docs \
         say plainly that higher clock speed is preferable to more cores. Proof of History is a \
-        sequential hash chain, so it is bound by single-core speed rather than core count.";
-    const EXPECTED: &str = "2.8 GHz or faster";
+        sequential hash chain, so it is bound by single-core speed rather than core count. \
+        /proc/cpuinfo reports what the governor is doing right now, not the base clock, so it \
+        reads high on a busy core and low on an idle one. Neither is the number Anza means.";
+    const EXPECTED: &str = "2.8 GHz base clock or faster";
 
     if let Some(o) = needs_linux(ctx, WHY) {
         return o;
@@ -106,36 +125,62 @@ pub fn base_clock(ctx: &Ctx) -> Outcome {
     let Some(want) = ctx.profile.thresholds().base_clock_mhz else {
         return Outcome::skipped("no clock requirement for this profile");
     };
-    let mhz = info
+
+    // cpufreq publishes the real thing. Fall back to the governor's current
+    // reading only to say so, never to fail a machine on it.
+    let khz = |p: &str| {
+        ctx.fs
+            .read(p)
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .map(|k| k / 1000.0)
+    };
+    let base = khz("/sys/devices/system/cpu/cpu0/cpufreq/base_frequency")
+        .or_else(|| khz("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq"));
+    if let Some(m) = base {
+        let observed = format!("{model} at {m:.0} MHz base");
+        return match m >= want {
+            true => Outcome::pass(observed, EXPECTED).why(WHY),
+            false => Outcome::fail(observed, EXPECTED)
+                .why(WHY)
+                .fix(vec![FixStep::noted(
+                    "check the BIOS for a power or efficiency profile capping the clock",
+                    "a base below Anza's figure is usually firmware, not the silicon",
+                )]),
+        };
+    }
+
+    let current = info
         .lines()
         .find(|l| l.starts_with("cpu MHz"))
         .and_then(|l| l.split(':').nth(1))
         .and_then(|v| v.trim().parse::<f64>().ok());
-    // Anza states 2.8 GHz; below that is a finding, not a preference.
-    match mhz {
-        None => Outcome::unknown(format!("{model}: no cpu MHz reported")).why(WHY),
-        Some(m) if m >= want => {
-            Outcome::pass(format!("{model} at {:.0} MHz", m), EXPECTED).why(WHY)
-        }
-        Some(m) => Outcome::fail(format!("{model} at {:.0} MHz", m),
+    match current {
+        None => Outcome::unknown(format!("{model}: no clock reported")).why(WHY),
+        // Above the bar on a governor reading still clears the bar.
+        Some(m) if m >= want => Outcome::pass(
+            format!("{model} at {m:.0} MHz current, base not published by this kernel"),
             EXPECTED,
         )
+        .why(WHY),
+        // Below it proves nothing: an idle core throttles well under base.
+        Some(m) => Outcome::unknown(format!(
+            "{model} at {m:.0} MHz current, which is the governor's reading and not the base clock"
+        ))
+        .expected(EXPECTED)
         .why(WHY)
-        .fix(vec![FixStep::noted(
-            "check the BIOS for a power or efficiency profile capping the clock",
-            "a reported clock below base often means a governor or firmware cap, not the silicon",
-        )]),
+        .verify("lscpu | grep -i 'model name\\|CPU max MHz'"),
     }
 }
 
 /// PF-HW-0004. Cores. Reported, never failed: Anza publishes no minimum.
 pub fn cores(ctx: &Ctx) -> Outcome {
-    const WHY: &str = "Core count is not the metric, and the community hardware list shows why: \
-        a 16 core Ryzen 9950X reaches about 23M PoH hashes per second, while a 32 core EPYC 9354P \
-        reaches 14M to 16M. Both are on the recommended list. Proof of History is a sequential \
-        chain, so single core speed decides whether you keep up. Anza publishes no minimum and \
-        preflight will not invent one.";
-    const EXPECTED: &str = "no published minimum; 16 core parts are on the recommended list";
+    const WHY: &str = "Anza publishes no core count for validators; the 12 cores and 24 threads \
+        in its table are the RPC column. Clock still dominates, and the community list shows why: \
+        a 16 core Ryzen 9950X reaches about 23M PoH hashes per second while a 32 core EPYC 9354P \
+        reaches 14M to 16M. But cores decide how much else fits beside the PoH thread, so the \
+        figures below are an operator floor from running these clusters rather than anything Anza \
+        states: 16 cores carries testnet, and mainnet wants 24.";
 
     if let Some(o) = needs_linux(ctx, WHY) {
         return o;
@@ -144,16 +189,57 @@ pub fn cores(ctx: &Ctx) -> Outcome {
         return Outcome::unknown("cannot read /proc/cpuinfo").why(WHY);
     };
     let threads = info.lines().filter(|l| l.starts_with("processor")).count();
-    let physical = info
-        .lines()
-        .find(|l| l.starts_with("cpu cores"))
-        .and_then(|l| l.split(':').nth(1))
-        .and_then(|v| v.trim().parse::<usize>().ok());
+    let physical = physical_cores(&info);
     let observed = match physical {
         Some(p) => format!("{p} physical cores, {threads} threads"),
         None => format!("{threads} threads, physical core count not reported"),
     };
-    Outcome::reported(observed, EXPECTED).why(WHY)
+    let Some(want) = ctx.profile.thresholds().cores else {
+        return Outcome::reported(observed, "no floor on this profile").why(WHY);
+    };
+    let expected = format!("{want} physical cores for {}", ctx.profile.label());
+    match physical {
+        None => Outcome::reported(observed, expected).why(WHY),
+        Some(p) if p >= want => Outcome::pass(observed, expected).why(WHY),
+        Some(_) => Outcome::fail(observed, expected)
+            .why(WHY)
+            .fix(vec![FixStep::noted(
+                format!("run this one on a box with {want} cores or more"),
+                "nothing on this machine changes its core count, so this is a hardware decision",
+            )]),
+    }
+}
+
+/// cpuinfo's "cpu cores" is per socket, so a dual socket box under-counts.
+/// Unique (physical id, core id) pairs are the real number.
+fn physical_cores(info: &str) -> Option<usize> {
+    let mut seen = std::collections::BTreeSet::new();
+    let (mut socket, mut core) = (None, None);
+    for line in info.lines() {
+        let value = || {
+            line.split(':')
+                .nth(1)
+                .and_then(|v| v.trim().parse::<u32>().ok())
+        };
+        match line {
+            _ if line.starts_with("physical id") => socket = value(),
+            _ if line.starts_with("core id") => core = value(),
+            _ => continue,
+        }
+        if let (Some(s), Some(c)) = (socket, core) {
+            seen.insert((s, c));
+            (socket, core) = (None, None);
+        }
+    }
+    match seen.is_empty() {
+        false => Some(seen.len()),
+        // Single socket kernels may omit the topology lines entirely.
+        true => info
+            .lines()
+            .find(|l| l.starts_with("cpu cores"))
+            .and_then(|l| l.split(':').nth(1))
+            .and_then(|v| v.trim().parse().ok()),
+    }
 }
 
 /// PF-HW-0005. RAM. Anza suggests a 512 GB-capable board, which is guidance

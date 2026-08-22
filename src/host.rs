@@ -222,28 +222,15 @@ fn statvfs_gb(fs: &Rootfs, target: &str) -> Option<(f64, f64)> {
     if fs.is_prefixed() {
         return None;
     }
-    unsafe extern "C" {
-        fn statvfs(path: *const i8, buf: *mut Statvfs) -> i32;
-    }
-    #[repr(C)]
-    #[derive(Default)]
-    struct Statvfs {
-        f_bsize: u64,
-        f_frsize: u64,
-        f_blocks: u64,
-        f_bfree: u64,
-        f_bavail: u64,
-        rest: [u64; 8],
-    }
     let c = std::ffi::CString::new(target).ok()?;
-    let mut s = Statvfs::default();
-    let rc = unsafe { statvfs(c.as_ptr(), &mut s) };
-    if rc != 0 || s.f_frsize == 0 {
+    let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c.as_ptr(), &mut s) } != 0 || s.f_frsize == 0 {
         return None;
     }
+    let unit = s.f_frsize as f64;
     Some((
-        s.f_bavail as f64 * s.f_frsize as f64 / 1e9,
-        s.f_blocks as f64 * s.f_frsize as f64 / 1e9,
+        s.f_bavail as f64 * unit / 1e9,
+        s.f_blocks as f64 * unit / 1e9,
     ))
 }
 

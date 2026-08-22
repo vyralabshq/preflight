@@ -437,9 +437,8 @@ fn why_text_is_present_even_when_passing() {
     );
 }
 
-/// Spec §11 rule 3, as an invariant rather than an argument. Whatever an
-/// unreleased changelog says today, a check sourced to it may not reach a
-/// released client. If the 4.3 text changes before the tag exists, nobody gets
+/// Whatever an unreleased changelog says today, a check sourced to it may not
+/// reach a released client. If the 4.3 text changes before the tag exists, nobody gets
 /// bad advice either way.
 #[test]
 fn provisional_checks_cannot_reach_a_released_client() {
@@ -596,7 +595,11 @@ fn elevated_read_count_reflects_what_actually_runs() {
         "--client",
         "agave-validator@4.2.1",
     ]);
-    assert!(all.contains("1 check needs elevated reads"), "{all}");
+    // No check claims elevated reads while preflight never executes sudo.
+    assert!(
+        !all.contains("needs elevated reads"),
+        "the header must not promise a prompt the binary does not have:\n{all}"
+    );
     assert!(all.contains("XDP networking"), "{all}");
 }
 
@@ -896,7 +899,7 @@ fn an_adequate_kernel_default_is_not_ephemeral() {
         block.contains("PASS"),
         "fs.nr_open at its default is fine: {block}"
     );
-    assert!(block.contains("kernel default"), "{block}");
+    assert!(block.contains("stock value"), "{block}");
 }
 
 /// FS is the layer that answers "can this machine run a validator" before
@@ -1297,8 +1300,8 @@ fn storage_thresholds_follow_the_profile() {
         "the same box must not fail on testnet:\n{block}"
     );
     assert!(
-        flat(block).contains("does not judge you against a size"),
-        "{block}"
+        flat(block).contains("operator one from running it"),
+        "the testnet floor is ours, and has to say so:\n{block}"
     );
 }
 
@@ -1563,18 +1566,6 @@ fn the_kernel_floor_follows_the_driver() {
     assert!(flat(block).contains("because the driver is igb"), "{block}");
 }
 
-#[test]
-fn a_current_kernel_passes_the_xdp_floor() {
-    let (o, _) = run(&[
-        "--root",
-        &host(&WRAPPER_SCRIPT_UNIT),
-        "--client",
-        "agave-validator@4.2.1",
-        "-v",
-    ]);
-    assert!(block_for(&o, "PF-KRN-0005").contains("PASS"), "{o}");
-}
-
 /// A forced profile that disagrees with the box has to say so. Every fix below
 /// quotes the real paths and services, and this report gets screenshotted.
 #[test]
@@ -1611,6 +1602,7 @@ fn the_header_is_enough_to_read_a_pasted_report() {
         &host(&WRAPPER_SCRIPT_UNIT),
         "--client",
         "agave-validator@4.3.0-beta.0",
+        "-v",
     ]);
     assert!(
         o.contains("4.3.0-beta.0"),
@@ -1618,6 +1610,13 @@ fn the_header_is_enough_to_read_a_pasted_report() {
     );
     assert!(o.contains("run         preflight --root"), "{o}");
     assert!(o.contains("UTC"), "{o}");
+    assert!(o.contains("preflight --profile mainnet"), "{o}");
+    // The pass cases for the two checks a stale box gets wrong most often.
+    assert!(block_for(&o, "PF-HW-0007").contains("PASS"), "{o}");
+    assert!(block_for(&o, "PF-KRN-0005").contains("PASS"), "{o}");
+
+    let clean = run_with_path(&fake_validator("4.2.1"), &["--profile", "testnet"]);
+    assert!(!clean.contains("preflight  ·"), "no double space:\n{clean}");
 }
 
 /// A box running testnet is a fair thing to judge against mainnet, so the
@@ -1647,13 +1646,6 @@ fn the_report_says_how_to_ask_about_another_cluster() {
     );
 }
 
-#[test]
-fn the_run_row_reads_cleanly_with_no_arguments() {
-    let dir = fake_validator("4.2.1");
-    let o = run_with_path(&dir, &["--profile", "testnet"]);
-    assert!(!o.contains("preflight  ·"), "no double space:\n{o}");
-}
-
 /// A release past standard support is usually why the kernel is old, and why
 /// catching up is a release upgrade rather than an apt command.
 #[test]
@@ -1672,18 +1664,6 @@ fn a_release_past_standard_support_is_reported() {
         "{block}"
     );
     assert!(flat(block).contains("plan a release upgrade"), "{block}");
-}
-
-#[test]
-fn a_supported_release_passes() {
-    let (o, _) = run(&[
-        "--root",
-        &host(&WRAPPER_SCRIPT_UNIT),
-        "--client",
-        "agave-validator@4.2.1",
-        "-v",
-    ]);
-    assert!(block_for(&o, "PF-HW-0007").contains("PASS"), "{o}");
 }
 
 /// The kernel floor is a property of the machine, so it belongs to the machine
@@ -1770,9 +1750,8 @@ fn the_headroom_figure_is_not_cited_to_anza() {
         "-v",
     ]);
     let block = block_for(&o, "PF-FS-0001");
-    assert!(flat(block).contains("no published figure"), "{block}");
     assert!(
-        flat(block).contains("preflight's own line, not anybody's published requirement"),
+        flat(block).contains("not anybody's published requirement"),
         "{block}"
     );
     assert!(
@@ -1993,4 +1972,99 @@ fn retention_larger_than_the_disk_is_a_finding() {
         .find(|l| l.contains("PF-FS-0007"))
         .unwrap_or_default();
     assert!(row.contains("DEFAULT_MAX_BLOCKSTORE_SHREDS"), "{row}");
+}
+
+/// An unexpanded token used to make thirteen ARG checks report PASS on flags
+/// nobody read, and the configuration question answer "yes" off nothing.
+#[test]
+fn an_unexpanded_token_is_unknown_not_a_clean_bill() {
+    let shell = Host {
+        name: "unexpanded-flags",
+        files: &[
+            (
+                "/etc/systemd/system/sol.service",
+                "[Service]\nUser=sol\nExecStart=/home/sol/bin/validator.sh\n",
+            ),
+            (
+                "/home/sol/bin/validator.sh",
+                "#!/usr/bin/env bash\nFLAGS=\"--ledger /mnt/ledger\"\n\
+                 exec agave-validator $FLAGS\n",
+            ),
+        ],
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let (o, code) = run(&[
+        "--root",
+        &host(&shell),
+        "--client",
+        "agave-validator@4.3.0",
+        "--profile",
+        "testnet",
+        "-v",
+    ]);
+    let block = block_for(&o, "PF-ARG-0001");
+    assert!(block.contains("UNKNOWN"), "{block}");
+    assert!(
+        flat(block).contains("$FLAGS"),
+        "the token must be shown:\n{block}"
+    );
+    assert!(
+        !o.contains("IS THE VALIDATOR CONFIGURED CORRECTLY?\n  yes"),
+        "an unread command line cannot answer yes:\n{o}"
+    );
+    // Other findings on this fixture outrank unknown, but never with a zero.
+    assert_ne!(
+        code, 0,
+        "an unread command line is not a pass:
+{o}"
+    );
+}
+
+/// /proc/cpuinfo reports the governor's current speed, not the base clock. An
+/// idle core reads well under base and used to FAIL a machine that meets Anza.
+#[test]
+fn an_idle_core_is_unknown_not_a_slow_cpu() {
+    let idle = Host {
+        name: "idle-core",
+        mhz: "1500.000",
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let (o, _) = run(&[
+        "--root",
+        &host(&idle),
+        "--client",
+        "agave-validator@4.3.0",
+        "--profile",
+        "testnet",
+    ]);
+    let block = block_for(&o, "PF-HW-0003");
+    assert!(
+        block.contains("UNKNOWN"),
+        "a throttled core is not slow silicon:\n{block}"
+    );
+
+    let published = Host {
+        name: "idle-core-with-sysfs",
+        mhz: "1500.000",
+        files: &[(
+            "/sys/devices/system/cpu/cpu0/cpufreq/base_frequency",
+            "3000000\n",
+        )],
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let (o, _) = run(&[
+        "--root",
+        &host(&published),
+        "--client",
+        "agave-validator@4.3.0",
+        "--profile",
+        "testnet",
+        "-v",
+    ]);
+    let block = block_for(&o, "PF-HW-0003");
+    assert!(
+        block.contains("PASS"),
+        "sysfs publishes the real base:\n{block}"
+    );
+    assert!(flat(block).contains("3000 MHz base"), "{block}");
 }

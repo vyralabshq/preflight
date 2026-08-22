@@ -24,7 +24,7 @@ to start without; and disks, filesystems and free space.
 the command line survived the last upgrade, and the Linux capabilities the v4.2
 XDP transmit path requires.
 
-30 checks today. Process limits, network, systemd and security are not built yet.
+35 checks today, across hardware, kernel, disks, one network card check, the validator command line and XDP capabilities. Process limits, systemd and security are not built yet. Firedancer is detected and skipped rather than checked.
 
 ## What a run looks like
 

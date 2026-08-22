@@ -53,7 +53,9 @@ const DRIVERS: &[DriverSupport] = &[
         driver: "ice",
         family: "Intel E800 series",
         plain: Xdp::Works,
-        zero_copy: Xdp::Works,
+        // Anza's guide names ice alongside bnxt_en as a driver not to pass
+        // zero copy with, whatever the community table reports.
+        zero_copy: Xdp::No,
         note: "Supports native XDP and zero copy. XDP is blocked for frames larger than 3KB.",
     },
     DriverSupport {

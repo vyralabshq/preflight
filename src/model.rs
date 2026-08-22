@@ -144,6 +144,10 @@ pub struct Thresholds {
     /// Fraction of a filesystem that should still be free, on any cluster.
     pub min_free: f64,
     pub base_clock_mhz: Option<f64>,
+    /// Operator floors, not Anza's. Anza publishes no core count for validators
+    /// and no storage figure for testnet, and these come from running one.
+    pub cores: Option<usize>,
+    pub disk_gb: Option<f64>,
 }
 
 impl Profile {
@@ -155,6 +159,8 @@ impl Profile {
                 snapshots_gb: Some(500.0),
                 min_free: 0.15,
                 base_clock_mhz: Some(2800.0),
+                cores: Some(24),
+                disk_gb: Some(512.0),
             },
             Profile::Testnet => Thresholds {
                 accounts_gb: None,
@@ -162,6 +168,8 @@ impl Profile {
                 snapshots_gb: None,
                 min_free: 0.10,
                 base_clock_mhz: Some(2800.0),
+                cores: Some(16),
+                disk_gb: Some(250.0),
             },
             Profile::Local => Thresholds {
                 accounts_gb: None,
@@ -169,6 +177,8 @@ impl Profile {
                 snapshots_gb: None,
                 min_free: 0.05,
                 base_clock_mhz: None,
+                cores: None,
+                disk_gb: None,
             },
         }
     }
@@ -437,9 +447,9 @@ pub struct Check {
     pub title: &'static str,
     pub profiles: &'static [Profile],
     pub clients: &'static [ClientKind],
+    /// No check sets this yet: preflight never executes sudo, so claiming a
+    /// run needs elevated reads would be a promise the binary does not keep.
     pub needs_root: bool,
-    /// True when the check exists to report a number rather than judge it,
-    /// because no minimum is published. Its Unknown is by design, so it must
     pub source: &'static [Source],
     pub run: RunFn,
 }

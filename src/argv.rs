@@ -132,7 +132,7 @@ fn join_continuations(text: &str) -> String {
     text.replace("\\\n", " ")
 }
 
-fn is_validator_bin(tok: &str) -> bool {
+pub fn is_validator_bin(tok: &str) -> bool {
     let base = tok.rsplit('/').next().unwrap_or(tok);
     VALIDATOR_BINS.contains(&base)
 }
@@ -193,11 +193,17 @@ fn build(
 
 fn find_pid(fs: &Rootfs) -> Option<(String, Vec<String>)> {
     for p in fs.list("/proc") {
-        let name = p.file_name()?.to_string_lossy().to_string();
+        let Some(name) = p.file_name().map(|n| n.to_string_lossy().to_string()) else {
+            continue;
+        };
         if !name.chars().all(|c| c.is_ascii_digit()) {
             continue;
         }
-        let raw = std::fs::read_to_string(p.join("cmdline")).ok()?;
+        // One pid preflight cannot read is not the end of the search. It used
+        // to be: the ? here returned None for the whole function.
+        let Ok(raw) = std::fs::read_to_string(p.join("cmdline")) else {
+            continue;
+        };
         let words: Vec<String> = raw
             .split('\0')
             .filter(|s| !s.is_empty())
@@ -255,11 +261,15 @@ fn unit_details(fs: &Rootfs, name: &str) -> Option<(String, String, String)> {
 
 fn owning_unit(fs: &Rootfs) -> Option<(String, String, String)> {
     for unit in unit_files(fs) {
-        let text = std::fs::read_to_string(&unit).ok()?;
+        let Ok(text) = std::fs::read_to_string(&unit) else {
+            continue;
+        };
         if !launches_a_validator(fs, &text) {
             continue;
         }
-        let name = unit.file_name()?.to_string_lossy().to_string();
+        let Some(name) = unit.file_name().map(|n| n.to_string_lossy().to_string()) else {
+            continue;
+        };
         let abs = format!("/etc/systemd/system/{name}");
         let Some((exec, _)) = parse_unit(&text) else {
             continue;

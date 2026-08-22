@@ -188,28 +188,95 @@ fn detect_version(
         );
     };
 
-    let mut candidates: Vec<String> = Vec::new();
-    if let Some(pid) = &inv.pid
-        && let Ok(exe) = std::fs::read_link(format!("/proc/{pid}/exe"))
-    {
-        candidates.push(exe.to_string_lossy().to_string());
+    // argv[0] is whatever the caller passed to execve, so a process can name
+    // itself agave-validator and be anything. Executing that as root would
+    // hand it uid 0, so the version stays undetected instead.
+    if unsafe { libc_getuid() } == 0 {
+        return (
+            None,
+            VersionSource::Undetected(
+                "running as root, and preflight will not execute a binary it found by name. \
+                 Pass --client <name>@<version>, or run this unprivileged",
+            ),
+        );
     }
-    candidates.push(inv.program.clone());
 
-    for bin in candidates {
-        let Ok(out) = Command::new(&bin).arg("--version").output() else {
-            continue;
-        };
-        let text = String::from_utf8_lossy(&out.stdout).to_string()
-            + &String::from_utf8_lossy(&out.stderr);
-        if let Some(v) = ClientVersion::parse(&text) {
-            return (Some(v), VersionSource::Executed(format!("{bin} --version")));
+    // A resolved pid is the better answer, and its exe is a kernel-maintained
+    // link rather than a PATH lookup. Take it or nothing: falling through to
+    // argv[0] would search PATH for a name the process chose for itself.
+    let candidate = match &inv.pid {
+        Some(pid) => match std::fs::read_link(format!("/proc/{pid}/exe")) {
+            Ok(exe) => {
+                let name = exe
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                match crate::argv::is_validator_bin(&name) {
+                    true => exe.to_string_lossy().to_string(),
+                    false => {
+                        return (
+                            None,
+                            VersionSource::Undetected(
+                                "the running process does not point at a known validator binary",
+                            ),
+                        );
+                    }
+                }
+            }
+            Err(_) => {
+                return (
+                    None,
+                    VersionSource::Undetected("cannot read the process exe"),
+                );
+            }
+        },
+        None => inv.program.clone(),
+    };
+
+    match run_version(&candidate) {
+        Some(text) => match ClientVersion::parse(&text) {
+            Some(v) => (
+                Some(v),
+                VersionSource::Executed(format!("{candidate} --version")),
+            ),
+            None => (
+                None,
+                VersionSource::Undetected("the binary did not report a version preflight reads"),
+            ),
+        },
+        None => (
+            None,
+            VersionSource::Undetected("could not run the validator binary with --version"),
+        ),
+    }
+}
+
+/// A hung binary must not hang a read-only tool, so this waits a few seconds
+/// and gives up rather than blocking on output.
+fn run_version(bin: &str) -> Option<String> {
+    use std::process::Stdio;
+    let mut child = Command::new(bin)
+        .arg("--version")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                return None;
+            }
+            Err(_) => return None,
         }
     }
-    (
-        None,
-        VersionSource::Undetected("could not run the validator binary with --version"),
-    )
+    let out = child.wait_with_output().ok()?;
+    Some(String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr))
 }
 
 impl Ctx {

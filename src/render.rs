@@ -106,7 +106,7 @@ fn system_report(ctx: &Ctx, st: &Style, needs_root: usize) -> String {
                 d.push(format!("{t} threads"));
             }
             if let Some(hz) = f.mhz {
-                d.push(format!("{hz:.0} MHz"));
+                d.push(format!("{hz:.0} MHz current"));
             }
             d.push(match f.avx2 {
                 Some(true) => "AVX2 yes".to_string(),
@@ -285,8 +285,8 @@ fn finding(f: &Finding, st: &Style, verbose: bool) -> String {
     }
     let mut s = String::new();
     let tag = if f.provisional { "  [provisional]" } else { "" };
-    let title = if f.title.len() > 46 {
-        format!("{}...", &f.title[..43])
+    let title = if f.title.len() > 52 {
+        format!("{}...", &f.title[..49])
     } else {
         f.title.to_string()
     };

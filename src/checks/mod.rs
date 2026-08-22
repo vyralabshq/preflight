@@ -9,6 +9,7 @@ pub mod arg;
 pub mod fs;
 pub mod hw;
 pub mod kernel;
+pub mod net;
 pub mod xdp;
 
 /// Host layers read /proc and /sys.
@@ -31,4 +32,3 @@ pub fn needs_linux(ctx: &Ctx, why: &str) -> Option<Outcome> {
         .why(why),
     })
 }
-pub mod net;

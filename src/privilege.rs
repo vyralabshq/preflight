@@ -6,8 +6,8 @@
 //! `{}` placeholder filled with an interface name validated against
 //! /sys/class/net or a pid validated against /proc.
 //!
-//! The ARG layer needs none of these, which is why the M1 release prompts for
-//! nothing. The XDP, NET and SEC layers populate the list.
+//! The ARG layer needs none of these, so a run against a command line alone
+//! prompts for nothing.
 
 pub struct Elevated {
     pub command: &'static str,
@@ -23,10 +23,13 @@ pub static ALLOWLIST: &[Elevated] = &[Elevated {
 }];
 
 /// Validate an interface name against /sys/class/net before interpolation.
-/// Used by the M2 ethtool checks.
+/// Rejects . and .. and anything with a slash, since /sys/class/net/.. exists.
 #[allow(dead_code)]
 pub fn valid_interface(fs: &crate::host::Rootfs, name: &str) -> bool {
     !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains('/')
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')

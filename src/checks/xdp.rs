@@ -21,6 +21,12 @@ pub const S_CAPS: &[Source] = &[
         provisional: false,
     },
 ];
+pub const S_KERNEL: &[Source] = &[Source {
+    kind: AnzaBlog,
+    locator: "anza.xyz/blog/agave-xdp-setup-guide",
+    verified_against: "2026-08",
+    provisional: false,
+}];
 pub const S_CAP_PERSIST: &[Source] = &[Source {
     kind: AgaveChangelog,
     locator: "v4.0 Validator/Breaking (#9133)",
@@ -312,4 +318,58 @@ fn runtime_capprm(ctx: &Ctx) -> Option<u64> {
     let status = ctx.fs.read(format!("/proc/{pid}/status")).ok()?;
     let line = status.lines().find(|l| l.starts_with("CapPrm:"))?;
     u64::from_str_radix(line.split_whitespace().nth(1)?, 16).ok()
+}
+
+/// Anza's floor for the XDP transmit path, by driver.
+const KERNEL_FLOOR: (u32, u32) = (6, 8);
+const KERNEL_FLOOR_IGB: (u32, u32) = (6, 14);
+
+fn kernel_version(ctx: &Ctx) -> Option<(u32, u32)> {
+    let raw = ctx.fs.read_trim("/proc/sys/kernel/osrelease")?;
+    let mut parts = raw.split(['.', '-']);
+    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+}
+
+/// PF-XDP-0002. Whether the kernel is new enough for the transmit path agave
+/// now uses by default.
+///
+/// The floor depends on the driver, so this reads the card before deciding.
+pub fn kernel_floor(ctx: &Ctx) -> Outcome {
+    const WHY: &str = "XDP transmit is on by default on Linux since v4.2, and Anza's setup guide \
+        gives a kernel floor for it: 6.14 when the driver is igb, 6.8 otherwise. Below that the \
+        path is either unavailable or unreliable, and the node quietly falls back or misbehaves \
+        rather than refusing to start, so nothing tells you.";
+
+    if let Some(o) = client_gate(ctx) {
+        return o;
+    }
+    let Some(state) = xdp_state(ctx) else {
+        return Outcome::unknown("could not resolve a validator invocation").why(WHY);
+    };
+    if !state.enabled {
+        return Outcome::skipped("XDP not enabled, so no kernel floor applies");
+    }
+    let Some((major, minor)) = kernel_version(ctx) else {
+        return Outcome::unknown("cannot read the kernel version").why(WHY);
+    };
+
+    let driver = crate::checks::net::primary_interface(ctx)
+        .and_then(|iface| crate::checks::net::driver_of(ctx, &iface));
+    let (floor, because) = match driver.as_deref() {
+        Some("igb") => (KERNEL_FLOOR_IGB, " because the driver is igb"),
+        _ => (KERNEL_FLOOR, ""),
+    };
+    let expected = format!("kernel {}.{} or newer{because}", floor.0, floor.1);
+    let observed = format!("kernel {major}.{minor}");
+
+    match (major, minor) >= floor {
+        true => Outcome::pass(observed, expected).why(WHY),
+        false => Outcome::fail(observed, expected)
+            .why(WHY)
+            .fix(vec![FixStep::noted(
+                format!("upgrade the kernel to {}.{} or newer", floor.0, floor.1),
+                "or pass --no-xdp until you do, which is the honest fallback rather than running \
+             the path on a kernel that cannot carry it",
+            )]),
+    }
 }

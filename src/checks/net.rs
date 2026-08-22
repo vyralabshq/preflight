@@ -104,7 +104,7 @@ const DRIVERS: &[DriverSupport] = &[
 ];
 
 /// The default route's interface, which is the one the validator gossips over.
-fn primary_interface(ctx: &Ctx) -> Option<String> {
+pub fn primary_interface(ctx: &Ctx) -> Option<String> {
     let routes = ctx.fs.read("/proc/net/route").ok()?;
     routes
         .lines()
@@ -117,7 +117,7 @@ fn primary_interface(ctx: &Ctx) -> Option<String> {
 }
 
 /// The driver name, read from the sysfs symlink rather than by running ethtool.
-fn driver_of(ctx: &Ctx, iface: &str) -> Option<String> {
+pub fn driver_of(ctx: &Ctx, iface: &str) -> Option<String> {
     let link = ctx.fs.at(format!("/sys/class/net/{iface}/device/driver"));
     let target = std::fs::read_link(&link).ok()?;
     Some(target.file_name()?.to_string_lossy().to_string())

@@ -1873,3 +1873,71 @@ fn the_ledger_defaults_come_from_the_validator_not_the_test_validator() {
     assert!(flat(block).contains("200,000,000"), "{block}");
     assert!(flat(block).contains("400,000,000"), "{block}");
 }
+
+/// A fix block that restarts before the edit reads as "restart, then change it".
+#[test]
+fn the_restart_comes_last_in_a_fix_block() {
+    let unit = Host {
+        name: "cache-limit-unit",
+        files: &[
+            (
+                "/etc/systemd/system/sol.service",
+                "[Service]\nUser=sol\nExecStart=/home/sol/bin/validator.sh\n",
+            ),
+            (
+                "/home/sol/bin/validator.sh",
+                "#!/usr/bin/env bash\nexec agave-validator --ledger /mnt/ledger \
+                 --accounts /mnt/accounts --dynamic-port-range 8000-8030 \
+                 --accounts-db-cache-limit-mb 10240\n",
+            ),
+        ],
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let (o, _) = run(&[
+        "--root",
+        &host(&unit),
+        "--client",
+        "agave-validator@4.2.1",
+        "--profile",
+        "testnet",
+    ]);
+    let block = block_for(&o, "PF-ARG-0008");
+    let edit = block.find("edit /home/sol").expect("edit step");
+    let change = block.find("is replaced by").expect("change step");
+    let restart = block.find("systemctl restart").expect("restart step");
+    assert!(edit < change, "edit before the change:\n{block}");
+    assert!(change < restart, "restart last:\n{block}");
+}
+
+/// Two checks each held half of this: one knows free space, the other knows the
+/// retention setting. Neither said the blockstore was aimed at more disk than
+/// exists.
+#[test]
+fn retention_larger_than_the_disk_is_a_finding() {
+    // Free space is only measurable on the real host, so under --root this
+    // reports what it cannot see rather than guessing.
+    let (o, _) = run(&[
+        "--root",
+        &host(&WRAPPER_SCRIPT_UNIT),
+        "--client",
+        "agave-validator@4.3.0-beta.0",
+        "-v",
+    ]);
+    let block = block_for(&o, "PF-FS-0007");
+    assert!(
+        block.contains("SKIPPED"),
+        "a captured tree carries no free space, which is out of scope not unknown:\n{block}"
+    );
+    assert!(
+        flat(block).contains("cannot be read from a captured tree"),
+        "{block}"
+    );
+
+    // The check exists and is registered; its sizing is cited to the symbol.
+    let (reg, _) = run(&["--dump-registry"]);
+    let row = reg
+        .lines()
+        .find(|l| l.contains("PF-FS-0007"))
+        .unwrap_or_default();
+    assert!(row.contains("DEFAULT_MAX_BLOCKSTORE_SHREDS"), "{row}");
+}

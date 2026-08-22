@@ -171,6 +171,42 @@ pub fn gather(fs: &Rootfs) -> Facts {
     f
 }
 
+/// du, in process. Sums allocated blocks rather than file lengths so the answer
+/// matches what du reports and what the filesystem actually gave away. Real host
+/// only, for the same reason as statvfs. rocksdb keeps a few thousand large SSTs
+/// rather than many small files, so this is metadata reads, not a content walk.
+pub fn dir_size_gb(fs: &Rootfs, path: &str) -> Option<f64> {
+    use std::os::unix::fs::MetadataExt;
+    if fs.is_prefixed() {
+        return None;
+    }
+    let mut total: u64 = 0;
+    let mut stack = vec![std::path::PathBuf::from(path)];
+    let mut seen = 0u32;
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            // The top of the tree failing means no answer. A subdirectory the
+            // caller cannot read means an undercount, which would be worse to
+            // report as a figure than to withhold.
+            return None;
+        };
+        for e in entries.flatten() {
+            let Ok(md) = e.metadata() else { return None };
+            seen += 1;
+            // A blockstore should never hold this many entries. Bail rather
+            // than stall a read-only tool on a pathological tree.
+            if seen > 2_000_000 {
+                return None;
+            }
+            match md.is_dir() {
+                true => stack.push(e.path()),
+                false => total += md.blocks() * 512,
+            }
+        }
+    }
+    Some(total as f64 / 1e9)
+}
+
 /// statvfs on the real host only. Under --root the numbers would describe the
 /// machine running preflight, not the machine being reported on.
 fn space_gb(fs: &Rootfs, target: &str) -> (Option<f64>, Option<f64>) {
@@ -308,4 +344,40 @@ pub fn now_utc() -> String {
         month += 1;
     }
     format!("{year}-{:02}-{:02} {h:02}:{m:02} UTC", month + 1, left + 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The check used to print du as an instruction. It runs it now, so the
+    /// walk has to be right: nested directories counted, unreadable trees
+    /// withheld rather than undercounted, captured trees out of scope.
+    #[test]
+    fn directory_sizes_are_measured_not_delegated() {
+        let dir = std::env::temp_dir().join("preflight-dirsize-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("nested")).unwrap();
+        std::fs::write(dir.join("a"), vec![0u8; 2_000_000]).unwrap();
+        std::fs::write(dir.join("nested/b"), vec![0u8; 3_000_000]).unwrap();
+
+        let live = Rootfs::new(None);
+        let got = dir_size_gb(&live, dir.to_str().unwrap()).expect("a readable tree measures");
+        // Allocated blocks, so at least the bytes written and not wildly over.
+        assert!(
+            (0.005..0.02).contains(&got),
+            "5 MB across two directories, got {got} GB"
+        );
+
+        assert!(
+            dir_size_gb(&live, "/nonexistent-preflight-path").is_none(),
+            "an unreadable tree has no answer, and an undercount would be worse"
+        );
+        let captured = Rootfs::new(Some(PathBuf::from("/tmp")));
+        assert!(
+            dir_size_gb(&captured, dir.to_str().unwrap()).is_none(),
+            "a captured tree carries no sizes for the machine being reported on"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

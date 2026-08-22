@@ -208,6 +208,12 @@ fn system_report(ctx: &Ctx, st: &Style, needs_root: usize) -> String {
             ))
         );
     }
+    // The verdict names a cluster, so the report has to say where that came
+    // from and how to ask a different question.
+    row!(
+        "profile",
+        format!("{}  ·  {}", ctx.profile.label(), ctx.profile_reason)
+    );
     row!("preflight", mode);
     format!("{}{}", st.bold("SYSTEM\n"), out.concat())
 }

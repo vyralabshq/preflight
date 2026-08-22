@@ -1749,3 +1749,44 @@ fn the_settled_flags_cite_the_binary_not_the_changelog() {
         .unwrap_or_default();
     assert!(row.contains("provisional"), "{row}");
 }
+
+/// The doubling guidance applies to a value someone chose. On the default there
+/// is no number, and telling an operator to double one would have them invent
+/// it. This is exactly the shape of a real start script.
+#[test]
+fn a_flag_with_no_value_is_a_rename_not_a_conversion() {
+    let bare = invocation(
+        "default-ledger-size.txt",
+        "exec agave-validator --ledger /l --accounts /a --limit-ledger-size\n",
+    );
+    let (o, _) = run(&[
+        "--invocation",
+        bare.to_str().unwrap(),
+        "--client",
+        "agave-validator@4.3.0-beta.0",
+        "--profile",
+        "testnet",
+    ]);
+    let block = block_for(&o, "PF-ARG-0011");
+    assert!(flat(block).contains("with no value"), "{block}");
+    assert!(flat(block).contains("no value to convert"), "{block}");
+    assert!(!flat(block).contains("<2n>"), "nothing to double:\n{block}");
+
+    let sized = invocation(
+        "sized-ledger.txt",
+        "exec agave-validator --ledger /l --accounts /a --limit-ledger-size 50000000\n",
+    );
+    let (o, _) = run(&[
+        "--invocation",
+        sized.to_str().unwrap(),
+        "--client",
+        "agave-validator@4.3.0-beta.0",
+        "--profile",
+        "testnet",
+    ]);
+    let block = block_for(&o, "PF-ARG-0011");
+    assert!(
+        flat(block).contains("about 100000000"),
+        "doubled for them:\n{block}"
+    );
+}

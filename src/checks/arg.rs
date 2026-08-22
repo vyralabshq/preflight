@@ -615,13 +615,29 @@ pub fn limit_ledger_size(ctx: &Ctx) -> Outcome {
     if !inv.has("--limit-ledger-size") {
         return Outcome::pass("--limit-ledger-size not in use", EXPECTED).why(WHY);
     }
-    Outcome::fail("--limit-ledger-size present", EXPECTED)
-        .why(WHY)
-        .fix(edit_steps(
-            ctx,
-            "--limit-ledger-size <n>   ->   --limit-blockstore-size <2n>",
-            Some("starting point only; watch steady-state disk use after the change"),
-        ))
+    // The doubling guidance only applies to a value someone chose. On the
+    // default the swap is a rename, and telling an operator to double a number
+    // they never set would have them invent one.
+    match inv.value("--limit-ledger-size") {
+        Some(n) => Outcome::fail(format!("--limit-ledger-size {n}"), EXPECTED)
+            .why(format!(
+                "{WHY} You have set a value, so it does not carry across directly."
+            ))
+            .fix(edit_steps(
+                ctx,
+                format!("--limit-ledger-size {n}   ->   --limit-blockstore-size <about {}>", n.parse::<u64>().map(|v| v * 2).map(|v| v.to_string()).unwrap_or_else(|_| "twice that".into())),
+                Some("doubling is the documented starting point; watch steady-state disk use after the change"),
+            )),
+        None => Outcome::fail("--limit-ledger-size, with no value", EXPECTED)
+            .why(format!(
+                "{WHY} You are on the default, so this is a rename with no number to carry."
+            ))
+            .fix(edit_steps(
+                ctx,
+                "--limit-ledger-size   ->   --limit-blockstore-size",
+                Some("no value to convert, since you never set one"),
+            )),
+    }
 }
 
 /// PF-ARG-0012. Still provisional, and `--help` cannot settle it: a deprecated

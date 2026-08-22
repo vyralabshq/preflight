@@ -143,14 +143,52 @@ fn system_report(ctx: &Ctx, st: &Style, needs_root: usize) -> String {
         }
     }
 
+    // Mark the mounts the validator actually uses, since those are the ones
+    // every disk check judges.
+    let paths: Vec<(String, String)> = ctx
+        .inv()
+        .map(|i| {
+            [
+                ("accounts", "--accounts"),
+                ("ledger", "--ledger"),
+                ("snapshots", "--snapshots"),
+            ]
+            .iter()
+            .filter_map(|(label, flag)| i.value(flag).map(|v| (label.to_string(), v)))
+            .collect()
+        })
+        .unwrap_or_default();
+
     for (i, m) in f.mounts.iter().enumerate() {
         let free = match m.free_gb {
             Some(g) => format!("{g:.0} GB free"),
             None => "free space not measured".to_string(),
         };
+        // Only the mount that actually holds a path is marked, not every parent
+        // of it, or / would claim everything.
+        let holds: Vec<&str> = paths
+            .iter()
+            .filter(|(_, p)| {
+                let best = f
+                    .mounts
+                    .iter()
+                    .filter(|x| {
+                        p == &x.target
+                            || p.starts_with(&format!("{}/", x.target.trim_end_matches('/')))
+                            || x.target == "/"
+                    })
+                    .max_by_key(|x| x.target.len());
+                best.is_some_and(|x| x.target == m.target)
+            })
+            .map(|(label, _)| label.as_str())
+            .collect();
+        let note = match holds.is_empty() {
+            true => String::new(),
+            false => format!("  ·  {}", holds.join(", ")),
+        };
         row!(
             if i == 0 { "storage" } else { "" },
-            format!("{:<16}{:<10}{free}", m.target, m.fstype)
+            format!("{:<16}{:<10}{free}{note}", m.target, m.fstype)
         );
     }
 
@@ -172,7 +210,7 @@ fn system_report(ctx: &Ctx, st: &Style, needs_root: usize) -> String {
         ),
     };
     let validator = match (&ctx.version, ctx.validator_present) {
-        (Some(v), _) => format!("{} {}", ctx.client.label(), v.short()),
+        (Some(v), _) => format!("{} {}", ctx.client.label(), v.raw),
         (None, true) => format!("{}, version not detected", ctx.client.label()),
         (None, false) => "none installed".to_string(),
     };
@@ -214,6 +252,32 @@ fn system_report(ctx: &Ctx, st: &Style, needs_root: usize) -> String {
     row!(
         "profile",
         format!("{}  ·  {}", ctx.profile.label(), ctx.profile_reason)
+    );
+    // A forced profile that disagrees with the box gets said out loud, because
+    // this report gets screenshotted and every fix below quotes the real files.
+    if let Some((inferred, reason)) = &ctx.inferred_profile {
+        row!(
+            "",
+            st.paint(
+                Status::Ephemeral,
+                &format!(
+                    "this box looks like {}: {reason}. Findings below judge it as {}, \
+                     but the paths and services quoted are the real ones.",
+                    inferred.label(),
+                    ctx.profile.label()
+                )
+            )
+        );
+    }
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    row!(
+        "run",
+        format!(
+            "preflight {}  ·  {}",
+            args.join(" "),
+            crate::host::now_utc()
+        )
+        .replace("preflight   ", "preflight ")
     );
     row!("preflight", mode);
     format!("{}{}", st.bold("SYSTEM\n"), out.concat())

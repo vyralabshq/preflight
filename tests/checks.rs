@@ -932,9 +932,9 @@ fn shared_spinning_zfs_storage_is_caught_on_every_axis() {
         "testnet",
     ]);
     assert!(o.contains("accounts and ledger both on sda"), "{o}");
-    assert!(o.contains("spinning disk sda"), "{o}");
-    assert!(o.contains("no noatime"), "{o}");
-    assert!(o.contains("accounts on zfs"), "{o}");
+    assert!(flat(&o).contains("on spinning disk sda"), "{o}");
+    assert!(flat(&o).contains("has no noatime"), "{o}");
+    assert!(flat(&o).contains("/mnt/shared/accounts on zfs"), "{o}");
     assert!(flat(&o).contains("does not support O_DIRECT"), "{o}");
 }
 
@@ -1501,4 +1501,49 @@ fn a_current_kernel_passes_the_xdp_floor() {
         "-v",
     ]);
     assert!(block_for(&o, "PF-XDP-0002").contains("PASS"), "{o}");
+}
+
+/// A forced profile that disagrees with the box has to say so. Every fix below
+/// quotes the real paths and services, and this report gets screenshotted.
+#[test]
+fn a_forced_profile_that_contradicts_the_box_says_so() {
+    let (o, _) = run(&[
+        "--root",
+        &host(&WRAPPER_SCRIPT_UNIT),
+        "--client",
+        "agave-validator@4.2.1",
+        "--profile",
+        "mainnet",
+    ]);
+    assert!(flat(&o).contains("this box looks like testnet"), "{o}");
+    assert!(flat(&o).contains("judge it as mainnet"), "{o}");
+
+    // and it stays quiet when they agree
+    let (agree, _) = run(&[
+        "--root",
+        &host(&WRAPPER_SCRIPT_UNIT),
+        "--client",
+        "agave-validator@4.2.1",
+        "--profile",
+        "testnet",
+    ]);
+    assert!(!agree.contains("this box looks like"), "{agree}");
+}
+
+/// The header carries the version as reported, the command that produced the
+/// report and when, because this output is meant to be pasted at someone.
+#[test]
+fn the_header_is_enough_to_read_a_pasted_report() {
+    let (o, _) = run(&[
+        "--root",
+        &host(&WRAPPER_SCRIPT_UNIT),
+        "--client",
+        "agave-validator@4.3.0-beta.0",
+    ]);
+    assert!(
+        o.contains("4.3.0-beta.0"),
+        "prerelease must not read as 4.3.0:\n{o}"
+    );
+    assert!(o.contains("run         preflight --root"), "{o}");
+    assert!(o.contains("UTC"), "{o}");
 }

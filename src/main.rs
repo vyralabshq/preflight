@@ -237,7 +237,10 @@ fn main() {
     });
 
     // A person watching, with nothing pinned on the command line, gets asked.
+    // Only ask when the box did not say. An entrypoint naming a cluster is an
+    // answer, and asking anyway is friction for nothing.
     let interactive = cli.profile.is_none()
+        && !ctx.profile_confident
         && cli.format == Format::Text
         && std::io::stdin().is_terminal()
         && std::io::stdout().is_terminal();

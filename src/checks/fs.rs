@@ -114,7 +114,12 @@ where
     let all = mounts(ctx);
     let (good, bad): (Vec<_>, Vec<_>) = paths
         .iter()
-        .filter_map(|(label, path)| mount_for(&all, path).map(|m| test(m, label)))
+        .filter_map(|(label, path)| {
+            // The path the operator gave, not just "ledger", since a check that
+            // says "ledger at /" leaves them guessing which one it means.
+            let named = format!("{label} {path}");
+            mount_for(&all, path).map(|m| test(m, &named))
+        })
         .partition(Result::is_ok);
 
     match bad.is_empty() {
@@ -366,10 +371,11 @@ pub fn noatime(ctx: &Ctx) -> Outcome {
     if let Some(o) = needs_linux(ctx, WHY) {
         return o;
     }
-    per_path(ctx, EXPECTED, WHY, |m, label| {
+    per_path(ctx, EXPECTED, WHY, |m, named| {
         match m.options.split(',').any(|o| o == "noatime") {
-            true => Ok(format!("{label} at {}", m.target)),
-            false => Err(format!("{label} at {} has no noatime", m.target)),
+            true => Ok(named.to_string()),
+            // The mount carries the option, not the path, so name both.
+            false => Err(format!("{named}, mounted at {}, has no noatime", m.target)),
         }
     })
 }

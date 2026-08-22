@@ -24,6 +24,11 @@ pub struct Ctx {
     pub fs: Rootfs,
     pub profile: Profile,
     pub profile_reason: String,
+    /// What the box itself points to, kept even when a flag says otherwise, so
+    /// a forced profile that contradicts the machine can say so.
+    pub inferred_profile: Option<(Profile, String)>,
+    /// Whether the box itself named a cluster, or preflight had to guess.
+    pub profile_confident: bool,
     pub client: ClientKind,
     pub version: Option<ClientVersion>,
     pub version_source: VersionSource,
@@ -108,26 +113,42 @@ fn detect_client(inv: Option<&Invocation>, fs: &Rootfs) -> ClientKind {
     ClientKind::Unknown
 }
 
-fn infer_profile(inv: Option<&Invocation>, client: ClientKind) -> (Profile, String) {
+/// The inferred profile, why, and whether the box actually said so.
+///
+/// A bare machine could be headed anywhere, and a voting validator whose
+/// entrypoint names no cluster is a guess. Those are worth asking about. An
+/// entrypoint that says testnet is not.
+fn infer_profile(inv: Option<&Invocation>, client: ClientKind) -> (Profile, String, bool) {
     let Some(i) = inv else {
-        return (Profile::Local, "no validator invocation resolved".into());
+        return (
+            Profile::Local,
+            "no validator invocation resolved".into(),
+            false,
+        );
     };
     if client == ClientKind::TestValidator {
-        return (Profile::Local, "client is solana-test-validator".into());
+        return (
+            Profile::Local,
+            "client is solana-test-validator".into(),
+            true,
+        );
     }
     if !i.has("--vote-account") {
-        return (Profile::Local, "invocation has no --vote-account".into());
+        return (
+            Profile::Local,
+            "invocation has no --vote-account".into(),
+            true,
+        );
     }
     let entry = i.value("--entrypoint").unwrap_or_default();
-    if entry.contains("testnet") {
-        (Profile::Testnet, format!("entrypoint {entry}"))
-    } else if entry.contains("mainnet") {
-        (Profile::Mainnet, format!("entrypoint {entry}"))
-    } else {
-        (
+    match (entry.contains("testnet"), entry.contains("mainnet")) {
+        (true, _) => (Profile::Testnet, format!("entrypoint {entry}"), true),
+        (_, true) => (Profile::Mainnet, format!("entrypoint {entry}"), true),
+        _ => (
             Profile::Testnet,
             "voting validator, cluster not identified from entrypoint".into(),
-        )
+            false,
+        ),
     }
 }
 
@@ -238,14 +259,19 @@ impl Ctx {
             version_source = VersionSource::Flag;
         }
 
-        let (profile, profile_reason) = match opts.profile {
-            Some(p) => (p, "set with --profile".to_string()),
-            None => infer_profile(invocation.as_ref(), client),
-        };
-
         let validator_pid = invocation.as_ref().and_then(|i| i.pid.clone());
         let validator_present =
             invocation.is_some() || client != ClientKind::Unknown || opts.invocation_file.is_some();
+        let (guess, guess_reason, confident) = infer_profile(invocation.as_ref(), client);
+        let inferred = (guess, guess_reason);
+        let (profile, profile_reason) = match opts.profile {
+            Some(p) => (p, "set with --profile".to_string()),
+            None => inferred.clone(),
+        };
+        let inferred_profile = match opts.profile {
+            Some(p) if p != inferred.0 && validator_present => Some(inferred),
+            _ => None,
+        };
 
         Ctx {
             os: os_release(&fs),
@@ -257,6 +283,8 @@ impl Ctx {
             fs,
             profile,
             profile_reason,
+            inferred_profile,
+            profile_confident: confident,
             client,
             version,
             invocation,

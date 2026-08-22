@@ -264,3 +264,48 @@ impl ClientVersion {
 /// added for a newer release; the drift job in the README watches for this
 /// falling behind.
 pub const REGISTRY_COVERS_THROUGH: (u64, u64) = (4, 3);
+
+/// A UTC timestamp for the report header, so a pasted run says when it was
+/// taken. Seconds since the epoch converted by hand rather than pulling in a
+/// date library for one line.
+pub fn now_utc() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let (days, rem) = (secs / 86_400, secs % 86_400);
+    let (h, m) = (rem / 3600, (rem % 3600) / 60);
+
+    let mut year = 1970;
+    let mut left = days as i64;
+    loop {
+        let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+        let len = if leap { 366 } else { 365 };
+        if left < len {
+            break;
+        }
+        left -= len;
+        year += 1;
+    }
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let months = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut month = 0;
+    while left >= months[month] {
+        left -= months[month];
+        month += 1;
+    }
+    format!("{year}-{:02}-{:02} {h:02}:{m:02} UTC", month + 1, left + 1)
+}

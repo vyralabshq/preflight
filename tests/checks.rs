@@ -28,6 +28,7 @@ pub struct Host {
     /// interface name, driver, as a symlink target under sysfs
     pub nic: Option<(&'static str, &'static str)>,
     pub kernel: &'static str,
+    pub os_release: &'static str,
     /// any other file, given as an absolute path
     pub files: &'static [(&'static str, &'static str)],
 }
@@ -45,6 +46,7 @@ pub const FRESH_UBUNTU: Host = Host {
     mem_kb: 528_482_304,
     nic: Some(("eth0", "mlx5_core")),
     kernel: "6.8.0-31-generic",
+    os_release: "PRETTY_NAME=\"Ubuntu 24.04.1 LTS\"\nNAME=\"Ubuntu\"\nID=ubuntu\nVERSION_ID=\"24.04\"\n",
     disks: &[("sda", 500, false)],
     mounts: "/dev/sda1 / ext4 rw,relatime 0 0\n\
              /dev/sda2 /mnt/accounts ext4 rw,noatime 0 0\n\
@@ -192,11 +194,7 @@ pub fn build(h: &Host) -> PathBuf {
     }
     let _ = fs::remove_dir_all(&root);
 
-    write(
-        &root,
-        "/etc/os-release",
-        "PRETTY_NAME=\"Ubuntu 24.04.1 LTS\"\nNAME=\"Ubuntu\"\n",
-    );
+    write(&root, "/etc/os-release", h.os_release);
     write(
         &root,
         "/proc/sys/kernel/osrelease",
@@ -1467,7 +1465,7 @@ fn an_old_kernel_under_xdp_is_reported() {
         ..WRAPPER_SCRIPT_UNIT
     };
     let (o, _) = run(&["--root", &host(&old), "--client", "agave-validator@4.3.0"]);
-    let block = block_for(&o, "PF-XDP-0002");
+    let block = block_for(&o, "PF-KRN-0005");
     assert!(block.contains("FAIL"), "{block}");
     assert!(flat(block).contains("kernel 5.15"), "{block}");
     assert!(flat(block).contains("kernel 6.8 or newer"), "{block}");
@@ -1483,7 +1481,7 @@ fn the_kernel_floor_follows_the_driver() {
         ..WRAPPER_SCRIPT_UNIT
     };
     let (o, _) = run(&["--root", &host(&igb), "--client", "agave-validator@4.3.0"]);
-    let block = block_for(&o, "PF-XDP-0002");
+    let block = block_for(&o, "PF-KRN-0005");
     assert!(
         block.contains("FAIL"),
         "6.10 clears 6.8 but not igb's 6.14:\n{block}"
@@ -1500,7 +1498,7 @@ fn a_current_kernel_passes_the_xdp_floor() {
         "agave-validator@4.2.1",
         "-v",
     ]);
-    assert!(block_for(&o, "PF-XDP-0002").contains("PASS"), "{o}");
+    assert!(block_for(&o, "PF-KRN-0005").contains("PASS"), "{o}");
 }
 
 /// A forced profile that disagrees with the box has to say so. Every fix below
@@ -1580,4 +1578,73 @@ fn the_run_row_reads_cleanly_with_no_arguments() {
     let dir = fake_validator("4.2.1");
     let o = run_with_path(&dir, &["--profile", "testnet"]);
     assert!(!o.contains("preflight  ·"), "no double space:\n{o}");
+}
+
+/// A release past standard support is usually why the kernel is old, and why
+/// catching up is a release upgrade rather than an apt command.
+#[test]
+fn a_release_past_standard_support_is_reported() {
+    let old = Host {
+        name: "focal",
+        os_release: "PRETTY_NAME=\"Ubuntu 20.04.6 LTS\"\nID=ubuntu\nVERSION_ID=\"20.04\"\n",
+        kernel: "5.15.0-139-generic",
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let (o, _) = run(&["--root", &host(&old), "--client", "agave-validator@4.3.0"]);
+    let block = block_for(&o, "PF-HW-0007");
+    assert!(block.contains("FAIL"), "{block}");
+    assert!(
+        flat(block).contains("standard support ended 2025-05"),
+        "{block}"
+    );
+    assert!(flat(block).contains("plan a release upgrade"), "{block}");
+}
+
+#[test]
+fn a_supported_release_passes() {
+    let (o, _) = run(&[
+        "--root",
+        &host(&WRAPPER_SCRIPT_UNIT),
+        "--client",
+        "agave-validator@4.2.1",
+        "-v",
+    ]);
+    assert!(block_for(&o, "PF-HW-0007").contains("PASS"), "{o}");
+}
+
+/// The kernel floor is a property of the machine, so it belongs to the machine
+/// question. Under the configuration question it let a box that cannot carry
+/// the default transmit path answer "yes".
+#[test]
+fn the_kernel_floor_belongs_to_the_machine_question() {
+    let old = Host {
+        name: "old-kernel-placement",
+        kernel: "5.15.0-139-generic",
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let (o, _) = run(&["--root", &host(&old), "--client", "agave-validator@4.3.0"]);
+    let machine = o.split("IS THE VALIDATOR").next().unwrap_or_default();
+    assert!(machine.contains("PF-KRN-0005"), "{machine}");
+    assert!(
+        machine.contains("requirement"),
+        "the verdict must say no:\n{machine}"
+    );
+}
+
+/// Default-on XDP below the floor with no --no-xdp is not a tuning shortfall,
+/// and the fix leads with the action that helps today.
+#[test]
+fn an_unguarded_xdp_path_leads_with_the_fallback() {
+    let old = Host {
+        name: "unguarded-xdp",
+        kernel: "5.15.0-139-generic",
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let (o, _) = run(&["--root", &host(&old), "--client", "agave-validator@4.3.0"]);
+    let block = block_for(&o, "PF-KRN-0005");
+    assert!(flat(block).contains("live with no fallback"), "{block}");
+    assert!(
+        flat(block).contains("fix --no-xdp"),
+        "the fallback comes first:\n{block}"
+    );
 }

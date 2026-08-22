@@ -18,6 +18,22 @@ pub const S_REQ: &[Source] = &[Source {
     provisional: false,
 }];
 
+/// Anza's figures, plus a note that the headroom line is preflight's own.
+pub const S_REQ_AND_OPERATOR: &[Source] = &[
+    Source {
+        kind: AnzaDocs,
+        locator: "docs.anza.xyz/operations/requirements, Disk Storage",
+        verified_against: "2026-08",
+        provisional: false,
+    },
+    Source {
+        kind: Operator,
+        locator: "headroom figure is preflight's own, not published",
+        verified_against: "2026-08",
+        provisional: false,
+    },
+];
+
 /// noatime is common operator practice, not something Anza publishes. Citing
 /// their requirements page for it would be inventing a source.
 pub const S_OPERATOR: &[Source] = &[Source {
@@ -144,7 +160,9 @@ pub fn capacity(ctx: &Ctx) -> Outcome {
     const WHY_HEADROOM: &str = "Nobody publishes storage figures for this cluster, and operators \
         run it on far less than Anza's production numbers, so preflight does not judge you \
         against a size. What does take a node down is running out: partway through a snapshot \
-        download, or weeks later as the ledger grows. So this checks headroom instead.";
+        download, or weeks later as the ledger grows. The headroom figure below is preflight's \
+        own line, not anybody's published requirement, and a one-shot check sees a level rather \
+        than a rate, so treat it as a prompt to look at your own trend.";
 
     if let Some(o) = needs_linux(ctx, WHY_HEADROOM) {
         return o;
@@ -197,8 +215,11 @@ pub fn capacity(ctx: &Ctx) -> Outcome {
         false => WHY_HEADROOM,
     };
     let expected = match t.accounts_gb {
-        Some(_) => format!("about {NEED_TOTAL_GB:.0} GB across the validator's paths"),
-        None => format!("at least {:.0}% free on each path", t.min_free * 100.0),
+        Some(_) => format!("about {NEED_TOTAL_GB:.0} GB across the validator's paths, per Anza"),
+        None => format!(
+            "no published figure; preflight looks for {:.0}% free on each path",
+            t.min_free * 100.0
+        ),
     };
     if short.is_empty() {
         // A pass implies a threshold was met. On a cluster nobody publishes

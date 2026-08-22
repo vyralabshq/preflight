@@ -80,7 +80,7 @@ pub static CHECKS: &[Check] = &[
         profiles: &[Testnet, Mainnet],
         clients: ANY_CLIENT,
         needs_root: false,
-        source: fs::S_REQ,
+        source: fs::S_REQ_AND_OPERATOR,
         run: fs::capacity,
     },
     Check {

@@ -552,7 +552,17 @@ fn summary(ctx: &Ctx, findings: &[Finding], st: &Style) -> String {
             parts.push(st.paint(s, &format!("{} {}", n(s), s.label().to_lowercase())));
         }
     }
+    let advisories = findings
+        .iter()
+        .filter(|f| f.outcome.status == Status::Fail && f.severity == "advisory")
+        .count();
     let mut line = format!("\n{}\n", parts.join("  ·  "));
+    if advisories > 0 {
+        line.push_str(&st.dim(&format!(
+            "{advisories} of the failures {} advisory, which is why the verdicts above count fewer\n",
+            plural(advisories, "is", "are")
+        )));
+    }
 
     // Why a check was skipped, matched on the reason it recorded.
     const SKIP_REASONS: &[(&str, &str)] = &[

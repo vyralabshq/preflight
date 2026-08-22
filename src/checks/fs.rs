@@ -8,6 +8,7 @@
 use crate::{
     checks::needs_linux,
     ctx::Ctx,
+    host,
     model::{FixStep, Outcome, Source, SourceKind::*},
 };
 
@@ -502,11 +503,11 @@ pub const S_RETENTION: &[Source] = &[Source {
 /// aimed at more disk than exists is a future outage with a stated mechanism.
 pub fn retention_fits_disk(ctx: &Ctx) -> Outcome {
     const WHY: &str = "Agave sizes the blockstore in shreds and approximates a shred at 1250 \
-        bytes, so a retention target converts to a disk footprint. What preflight cannot see is \
-        how much of that target is already on disk: a store at 475 GB of a 500 GB target needs \
-        25 GB more, not 500. Free space alone would call that a shortfall and be wrong, so this \
-        reports the two numbers and the command that closes the gap.";
-    const EXPECTED: &str = "a retention target the ledger's filesystem can hold";
+        bytes, so a retention target converts to a disk footprint. What decides the question is \
+        not the target but the distance left to it: a store at 475 GB of a 500 GB target needs \
+        25 GB more, not 500. preflight measures the blockstore rather than asking you to, so the \
+        numbers below account for the whole filesystem and sum.";
+    const EXPECTED: &str = "room on the ledger's filesystem for the distance still to grow";
 
     if let Some(o) = needs_linux(ctx, WHY) {
         return o;
@@ -548,6 +549,14 @@ pub fn retention_fits_disk(ctx: &Ctx) -> Outcome {
         ),
     };
     let target_gb = total_shreds * BYTES_PER_SHRED / 1e9;
+    let bound_note = match bounded {
+        true => String::new(),
+        false => format!(
+            " That target comes from {constant}, which counts data shreds only, so it is an \
+             estimate at a 1:1 erasure ratio and not a ceiling. Moving to \
+             --limit-blockstore-size is what makes it one."
+        ),
+    };
 
     let all = mounts(ctx);
     let Some(m) = mount_for(&all, &ledger) else {
@@ -568,46 +577,74 @@ pub fn retention_fits_disk(ctx: &Ctx) -> Outcome {
         };
     };
 
-    let bound_note = match bounded {
-        true => String::new(),
-        false => format!(
-            " That figure comes from {constant}, which counts data shreds only, so it is an \
-             estimate at a 1:1 erasure ratio and not a bound. Moving to \
-             --limit-blockstore-size is what makes it one."
-        ),
+    let Some(store) = host::dir_size_gb(&ctx.fs, &format!("{ledger}/rocksdb")) else {
+        return match ctx.fs.is_prefixed() {
+            true => Outcome::skipped("directory sizes cannot be read from a captured tree"),
+            false => Outcome::unknown(format!("{ledger}/rocksdb could not be measured"))
+                .expected(EXPECTED)
+                .why(format!(
+                    "{WHY} Without the current size the distance to the target is unknowable, \
+                     and free space alone would call a store near its cap a shortfall."
+                ))
+                .verify(format!("sudo du -sh {ledger}/rocksdb")),
+        };
     };
-    let verify = format!("du -sh {ledger}/rocksdb");
-    let observed = format!(
-        "retention targets about {target_gb:.0} GB from {constant}; {} has {free:.0} GB free of \
-         {total:.0} GB",
-        m.target
+
+    // Snapshots only enter the arithmetic when they share the filesystem, since
+    // that is the only case where they compete for the same free space.
+    let snaps = inv
+        .value("--snapshots")
+        .filter(|p| mount_for(&all, p).is_some_and(|sm| sm.target == m.target))
+        .and_then(|p| host::dir_size_gb(&ctx.fs, &p));
+    let other = (total - free - store - snaps.unwrap_or(0.0)).max(0.0);
+    let ledger_line = format!(
+        "{} holds {total:.0} GB: blockstore {store:.0}, {}other {other:.0}, free {free:.0}",
+        m.target,
+        match snaps {
+            Some(v) => format!("snapshots {v:.0}, "),
+            None => String::new(),
+        }
     );
+    let need = target_gb - store;
+    let observed = format!("retention targets {target_gb:.0} GB from {constant}; {ledger_line}");
 
-    // Larger than the whole filesystem can never be met, whatever is on disk.
-    if target_gb > total {
-        return Outcome::fail(observed, format!("a target at or under {} total", m.target))
-            .why(format!("{WHY}{bound_note}"))
+    match () {
+        // Larger than the whole filesystem can never be met, whatever cleanup does.
+        _ if target_gb > total => Outcome::fail(observed, format!("a target under {total:.0} GB"))
+            .why(format!(
+                "{WHY}{bound_note} This target is larger than the entire filesystem, so the node \
+                 fills the disk on its way to a size it can never reach."
+            ))
             .fix(retention_fix(ctx, target_gb, total, bounded))
-            .verify(verify);
-    }
+            .verify(format!("du -sh {ledger}/rocksdb")),
 
-    // Otherwise preflight cannot decide without knowing current usage, and
-    // guessing from free space alone produces a false alarm on a store that is
-    // already near its cap and about to stop growing.
-    Outcome::reported(
-        observed,
-        format!("run {verify} to see how much of that target is already there"),
-    )
-    .why(format!(
-        "{WHY}{bound_note} If that number plus {free:.0} GB free is comfortably under \
-         {target_gb:.0} GB, the store is still filling and will plateau. If it is not, size the \
-         retention to the disk or move a path to another device."
-    ))
-    .fix(retention_fix(ctx, target_gb, free, bounded))
-    .verify(verify)
+        // The case one run genuinely can decide, and the one the operator was
+        // previously left to work out: distance still to grow against room left.
+        _ if need > free => Outcome::fail(
+            format!("{observed}; {need:.0} GB still to grow, {free:.0} GB left"),
+            EXPECTED,
+        )
+        .why(format!(
+            "{WHY}{bound_note} The store has {need:.0} GB left to grow before cleanup holds it \
+             flat, and only {free:.0} GB to grow into. It fills the disk first, weeks from now, \
+             with nothing at the time to connect the failure to this setting."
+        ))
+        .fix(retention_fix(ctx, target_gb, free + store, bounded))
+        .verify(format!("du -sh {ledger}/rocksdb")),
+
+        // At or past the cap already: cleanup is what holds it, not free space.
+        _ if need <= 0.0 => Outcome::pass(
+            format!("{ledger_line}; already at the {target_gb:.0} GB target"),
+            "cleanup holds the store flat from here, so free space stops falling to it",
+        ),
+
+        _ => Outcome::pass(
+            format!("{ledger_line}; {need:.0} GB still to grow"),
+            format!("{free:.0} GB free, which is more than the {need:.0} GB left to grow"),
+        ),
+    }
 }
 
-/// Both ways out, including the one that uses hardware already paid for.
 /// Round hard: the inputs are a 1250-byte approximation and an 80% rule of
 /// thumb, and nine significant figures would imply a measurement nobody made.
 fn sized_shreds(room_gb: f64) -> f64 {

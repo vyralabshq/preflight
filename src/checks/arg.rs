@@ -546,12 +546,25 @@ pub fn deprecated_accounts_db(ctx: &Ctx) -> Outcome {
     let cache_value = inv.value("--accounts-db-cache-limit-mb");
     let mut out = deprecated(ctx, found, EXPECTED, &why, changes);
     if cache_value.is_some() {
-        out.fix.push(FixStep::rename(
+        let step = FixStep::rename(
             "--accounts-db-cache-limit-mb",
             "--accounts-db-write-cache-limit",
             cache_value.as_deref(),
             ValueCarry::Unverified,
-        ));
+        );
+        // Before the restart, or the block reads "restart, then edit".
+        let at = out
+            .fix
+            .iter()
+            .position(|s| s.command.starts_with("sudo systemctl restart"))
+            .unwrap_or(out.fix.len());
+        out.fix.insert(
+            at,
+            FixStep {
+                command: format!("  {}", step.command),
+                note: step.note,
+            },
+        );
     }
     out
 }

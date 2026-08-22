@@ -15,9 +15,12 @@ mod render;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use ctx::{Ctx, CtxOptions};
-use model::{Check, Finding, Layer};
+use model::{Check, Finding, Layer, Profile};
 use render::Style;
-use std::{io::IsTerminal, path::PathBuf};
+use std::{
+    io::{IsTerminal, Write},
+    path::PathBuf,
+};
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
 pub enum ProfileArg {
@@ -149,6 +152,46 @@ fn selected(c: &Check, only: &[String], skip: &[String]) -> bool {
     !matches(skip)
 }
 
+/// Ask which cluster to judge against, defaulting to whatever was inferred.
+///
+/// Only when a person is watching: never when piped, never in CI, and never
+/// when --profile already said. Arrow key selection would mean putting the
+/// terminal in raw mode, which is a dependency this does not need; a number
+/// and Enter does the same job.
+fn ask_profile(inferred: Profile, reason: &str, st: &Style) -> Profile {
+    let options = [
+        (Profile::Testnet, "a voting validator on testnet"),
+        (Profile::Mainnet, "a voting validator on mainnet"),
+        (Profile::Local, "a test validator, not joining a cluster"),
+    ];
+    let default = options
+        .iter()
+        .position(|(p, _)| *p == inferred)
+        .unwrap_or(0)
+        + 1;
+
+    println!("\n{}", st.bold("Which are you asking about?"));
+    for (i, (p, description)) in options.iter().enumerate() {
+        let row = format!("  {}) {:<8} {}", i + 1, p.label(), description);
+        match i + 1 == default {
+            true => println!("{}", st.bold(&row)),
+            false => println!("{}", st.dim(&row)),
+        }
+    }
+    println!("{}", st.dim(&format!("  inferred: {reason}")));
+    print!("\n  [{default}] ");
+    let _ = std::io::stdout().flush();
+
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return inferred;
+    }
+    match line.trim().parse::<usize>() {
+        Ok(n) if (1..=options.len()).contains(&n) => options[n - 1].0,
+        _ => inferred,
+    }
+}
+
 fn explain(id: &str, st: &Style) -> i32 {
     let Some(c) = registry::find(id) else {
         eprintln!("no such check: {id}");
@@ -210,6 +253,28 @@ fn main() {
         client_override: cli.client.clone(),
         no_exec: cli.no_exec,
     });
+
+    // A person watching, with nothing pinned on the command line, gets asked.
+    let interactive = cli.profile.is_none()
+        && cli.format == Format::Text
+        && std::io::stdin().is_terminal()
+        && std::io::stdout().is_terminal();
+    let ctx = match interactive {
+        true => {
+            let chosen = ask_profile(ctx.profile, &ctx.profile_reason, &st);
+            match chosen == ctx.profile {
+                true => ctx,
+                false => Ctx::probe(CtxOptions {
+                    root: cli.root.clone(),
+                    profile: Some(chosen),
+                    invocation_file: cli.invocation.clone(),
+                    client_override: cli.client.clone(),
+                    no_exec: cli.no_exec,
+                }),
+            }
+        }
+        false => ctx,
+    };
 
     let mut findings = Vec::new();
     for c in registry::CHECKS {

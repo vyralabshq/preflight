@@ -1815,3 +1815,61 @@ fn the_ledger_size_check_explains_the_mechanism_not_the_changelog() {
         "the source is a symbol, not a paraphrase:\n{block}"
     );
 }
+
+/// A substitution preflight has not verified must never render as an arrow.
+/// Two live bugs were confident swaps: one quoted a default read from
+/// solana-test-validator's struct, the other ignored that the old flag name
+/// carried its unit.
+#[test]
+fn an_unverified_rename_never_renders_a_substitution() {
+    let inv = invocation(
+        "unverified-rename.txt",
+        "exec agave-validator --ledger /l --accounts /a --accounts-db-cache-limit-mb 10240\n",
+    );
+    let (o, _) = run(&[
+        "--invocation",
+        inv.to_str().unwrap(),
+        "--client",
+        "agave-validator@4.2.1",
+        "--profile",
+        "testnet",
+    ]);
+    let block = block_for(&o, "PF-ARG-0008");
+    assert!(
+        !flat(block).contains("--accounts-db-cache-limit-mb   ->"),
+        "the unit is unverified, so no arrow:\n{block}"
+    );
+    assert!(flat(block).contains("is replaced by"), "{block}");
+    assert!(
+        flat(block).contains("has not read the replacement's unit"),
+        "{block}"
+    );
+    // and it reports the value, which is what makes the unit question visible
+    assert!(flat(block).contains("10240"), "{block}");
+}
+
+/// The default quoted for --limit-blockstore-size came from DefaultTestArgs,
+/// which belongs to solana-test-validator. The real constants are 200,000,000
+/// and 400,000,000, already in the 2:1 ratio the changelog describes.
+#[test]
+fn the_ledger_defaults_come_from_the_validator_not_the_test_validator() {
+    let inv = invocation(
+        "ledger-defaults.txt",
+        "exec agave-validator --ledger /l --accounts /a --limit-ledger-size\n",
+    );
+    let (o, _) = run(&[
+        "--invocation",
+        inv.to_str().unwrap(),
+        "--client",
+        "agave-validator@4.3.0-beta.0",
+        "--profile",
+        "testnet",
+    ]);
+    let block = block_for(&o, "PF-ARG-0011");
+    assert!(
+        !flat(block).contains("800000"),
+        "that is the test validator's default:\n{block}"
+    );
+    assert!(flat(block).contains("200,000,000"), "{block}");
+    assert!(flat(block).contains("400,000,000"), "{block}");
+}

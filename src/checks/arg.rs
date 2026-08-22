@@ -7,7 +7,7 @@
 use crate::{
     argv::Invocation,
     ctx::Ctx,
-    model::{FixStep, Outcome, Source, SourceKind::*},
+    model::{FixStep, Outcome, Source, SourceKind::*, ValueCarry},
 };
 
 pub const PORT_RANGE_MIN_WIDTH: u16 = 26;
@@ -92,6 +92,12 @@ pub const S_43_LEDGER: &[Source] = &[
     Source {
         kind: AgaveSymbol,
         locator: "BlockstoreCleanupStrategy, CountDataShreds vs CountDataAndCodingShreds",
+        verified_against: "agave master",
+        provisional: false,
+    },
+    Source {
+        kind: AgaveSymbol,
+        locator: "LEGACY_DEFAULT_MAX_LEDGER_SHREDS 200000000, DEFAULT_MAX_BLOCKSTORE_SHREDS 400000000",
         verified_against: "agave master",
         provisional: false,
     },
@@ -223,6 +229,22 @@ fn edit_target_or(ctx: &Ctx) -> String {
 /// name: "sol.service" is only a convention in Anza's guide, and printing it on
 /// a host that uses a different one hands the operator a command that silently
 /// targets nothing.
+/// The edit-this-file wrapper around a single rename step.
+fn rename_steps(ctx: &Ctx, step: FixStep) -> Vec<FixStep> {
+    let mut steps = match ctx.inv().and_then(|i| i.edit_target.clone()) {
+        Some(f) => vec![FixStep::cmd(format!("edit {f}"))],
+        None => vec![FixStep::cmd("edit your validator command line")],
+    };
+    steps.push(FixStep {
+        command: format!("  {}", step.command),
+        note: step.note,
+    });
+    if let Some(u) = ctx.inv().and_then(|i| i.unit_name.clone()) {
+        steps.push(FixStep::cmd(format!("sudo systemctl restart {u}")));
+    }
+    steps
+}
+
 fn unit_or_placeholder(ctx: &Ctx) -> String {
     ctx.inv()
         .and_then(|i| i.unit_name.clone())
@@ -487,7 +509,9 @@ pub fn deprecated_accounts_db(ctx: &Ctx) -> Outcome {
     const WHY: &str = "Deprecated across v4.1 and v4.2. They still parse, so the node starts and \
         nothing looks wrong, but a deprecated flag no longer necessarily does what its name says.";
     const WHY_CACHE: &str = " --accounts-db-cache-limit-mb is superseded by \
-        --accounts-db-write-cache-limit, so the size you set here is not the one in effect.";
+        --accounts-db-write-cache-limit, so the size you set here is not the one in effect. The \
+        old name carries its unit and the new one does not, and preflight has not read the \
+        replacement's unit from your binary, so it will not tell you what number to put there.";
     const WHY_NOOP: &str = " --accounts-db-access-storages-method is a no-op since v4.2, because \
         mmap mode was removed entirely: whoever set it believes they chose a storage access mode \
         and did not.";
@@ -495,12 +519,10 @@ pub fn deprecated_accounts_db(ctx: &Ctx) -> Outcome {
 
     let inv = gate!(ctx, 4, 1, WHY);
     let found = inv.present_from(DEPRECATED_ADB);
-    let changes = found
+    let changes: Vec<String> = found
         .iter()
+        .filter(|f| f.as_str() != "--accounts-db-cache-limit-mb")
         .map(|f| match f.as_str() {
-            "--accounts-db-cache-limit-mb" => {
-                "--accounts-db-cache-limit-mb   ->   --accounts-db-write-cache-limit".to_string()
-            }
             "--accounts-db-access-storages-method" => {
                 "remove --accounts-db-access-storages-method   (no-op since v4.2)".to_string()
             }
@@ -518,7 +540,20 @@ pub fn deprecated_accounts_db(ctx: &Ctx) -> Outcome {
     if has("--accounts-db-access-storages-method") {
         why.push_str(WHY_NOOP);
     }
-    deprecated(ctx, found, EXPECTED, &why, changes)
+    // The old name carries its unit and the new one does not. preflight has not
+    // read the replacement's unit, so it names both flags and refuses to
+    // suggest a number.
+    let cache_value = inv.value("--accounts-db-cache-limit-mb");
+    let mut out = deprecated(ctx, found, EXPECTED, &why, changes);
+    if cache_value.is_some() {
+        out.fix.push(FixStep::rename(
+            "--accounts-db-cache-limit-mb",
+            "--accounts-db-write-cache-limit",
+            cache_value.as_deref(),
+            ValueCarry::Unverified,
+        ));
+    }
+    out
 }
 
 /// PF-ARG-0009. Reported as a deprecation on released channels. The behaviour
@@ -641,21 +676,34 @@ pub fn limit_ledger_size(ctx: &Ctx) -> Outcome {
                     "{WHY} You set {n}, which counted data shreds only, so about {doubled} keeps \
                      the same history under the flag that counts both."
                 ))
-                .fix(edit_steps(
+                .fix(rename_steps(
                     ctx,
-                    format!("--limit-ledger-size {n}   ->   --limit-blockstore-size {doubled}"),
-                    Some("a starting point, not a conversion; watch steady-state disk use after"),
+                    FixStep::rename(
+                        "--limit-ledger-size",
+                        "--limit-blockstore-size",
+                        Some(&n),
+                        ValueCarry::DifferentSemantics(
+                            "the new flag counts coding shreds too, so roughly double it; a \
+                             starting point, not a conversion",
+                        ),
+                    ),
                 ))
         }
         None => Outcome::fail("--limit-ledger-size, with no value", EXPECTED)
             .why(format!(
-                "{WHY} You are on the default, so there is no number to carry across: agave \
-                 applies its own default of 800000 shreds to the new flag."
+                "{WHY} You are on the default. The defaults already sit in that ratio: \
+                 LEGACY_DEFAULT_MAX_LEDGER_SHREDS is 200,000,000 data shreds and \
+                 DEFAULT_MAX_BLOCKSTORE_SHREDS is 400,000,000 data and coding shreds, so the \
+                 rename keeps the same retention with nothing to convert."
             ))
-            .fix(edit_steps(
+            .fix(rename_steps(
                 ctx,
-                "--limit-ledger-size   ->   --limit-blockstore-size",
-                Some("no value to convert, since you never set one"),
+                FixStep::rename(
+                    "--limit-ledger-size",
+                    "--limit-blockstore-size",
+                    None,
+                    ValueCarry::NoValueSet,
+                ),
             )),
     }
 }

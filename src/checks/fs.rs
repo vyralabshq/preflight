@@ -9,7 +9,7 @@ use crate::{
     checks::needs_linux,
     ctx::Ctx,
     host,
-    model::{FixStep, Outcome, Source, SourceKind::*},
+    model::{FixStep, Outcome, Source, SourceKind::*, Status},
 };
 
 pub const S_REQ: &[Source] = &[Source {
@@ -237,7 +237,10 @@ pub fn capacity(ctx: &Ctx) -> Outcome {
         // A pass implies a threshold was met. On a cluster nobody publishes
         // figures for there is no threshold, so this reports like cores and
         // memory do rather than claiming a bar was cleared.
-        return match t.accounts_gb.is_some() {
+        // Reported is for a check with no bar to clear. Once a profile carries
+        // a floor, meeting it is a pass and saying otherwise withholds an answer
+        // preflight actually has.
+        return match t.accounts_gb.is_some() || t.disk_gb.is_some() {
             true => Outcome::pass(seen.join(", "), expected).why(why),
             false => Outcome::reported(seen.join(", "), expected).why(why),
         };
@@ -264,13 +267,23 @@ fn bare_box_capacity(ctx: &Ctx, sized: bool, why_sized: &str, why_headroom: &str
         .facts
         .disks
         .iter()
-        .filter(|d| !d.rotational)
+        .filter(|d| !d.rotational && !d.mapped)
         .map(|d| d.size_gb)
         .sum();
-    let observed = format!(
-        "{usable:.0} GB across {} solid-state device(s)",
-        ctx.facts.disks.iter().filter(|d| !d.rotational).count()
-    );
+    let counted = ctx
+        .facts
+        .disks
+        .iter()
+        .filter(|d| !d.rotational && !d.mapped)
+        .count();
+    let mapped = ctx.facts.disks.iter().filter(|d| d.mapped).count();
+    let observed = match mapped {
+        0 => format!("{usable:.0} GB across {counted} solid-state device(s)"),
+        n => format!(
+            "{usable:.0} GB across {counted} solid-state device(s), with {n} mapper volume(s) on \
+             top of them not counted again"
+        ),
+    };
     match sized && usable < NEED_TOTAL_GB {
         true => Outcome::fail(observed, expected)
             .why(why)
@@ -410,13 +423,53 @@ pub fn noatime(ctx: &Ctx) -> Outcome {
     if let Some(o) = needs_linux(ctx, WHY) {
         return o;
     }
-    per_path(ctx, EXPECTED, WHY, |m, named| {
+    let out = per_path(ctx, EXPECTED, WHY, |m, named| {
         match m.options.split(',').any(|o| o == "noatime") {
             true => Ok(named.to_string()),
             // The mount carries the option, not the path, so name both.
             false => Err(format!("{named}, mounted at {}, has no noatime", m.target)),
         }
-    })
+    });
+    if out.status != Status::Fail {
+        return out;
+    }
+    // A finding with nothing to do about it is half a finding, and the target
+    // is the mount rather than the path the validator was given.
+    let targets: Vec<String> = {
+        let all = mounts(ctx);
+        let mut t: Vec<String> = validator_paths(ctx)
+            .iter()
+            .filter_map(|(_, p)| mount_for(&all, p))
+            .filter(|m| !m.options.split(',').any(|o| o == "noatime"))
+            .map(|m| m.target.clone())
+            .collect();
+        t.sort();
+        t.dedup();
+        t
+    };
+    let root = targets.iter().any(|t| t == "/");
+    let mut fix = vec![FixStep::noted(
+        format!(
+            "add noatime to the {} entry in /etc/fstab",
+            targets.join(" and ")
+        ),
+        "fstab is what survives a reboot, so it is the edit that counts",
+    )];
+    fix.push(match root {
+        true => FixStep::noted(
+            format!("sudo mount -o remount,noatime {}", targets.join(" ")),
+            "remounting the root filesystem is live and does not need a reboot, but do it when \
+             you can watch the node rather than during a restart",
+        ),
+        false => FixStep::cmd(format!(
+            "sudo mount -o remount,noatime {}",
+            targets.join(" ")
+        )),
+    });
+    out.fix(fix).verify(format!(
+        "findmnt -no OPTIONS {}",
+        targets.first().cloned().unwrap_or_else(|| "/".into())
+    ))
 }
 
 /// PF-FS-0005. Filesystem type.

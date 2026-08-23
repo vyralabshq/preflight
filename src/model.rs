@@ -144,9 +144,7 @@ pub struct Thresholds {
     /// Fraction of a filesystem that should still be free, on any cluster.
     pub min_free: f64,
     pub base_clock_mhz: Option<f64>,
-    /// Operator floors, not Anza's. Anza publishes no core count for validators
-    /// and no storage figure for testnet, and these come from running one.
-    pub cores: Option<usize>,
+    /// Operator floor for disk size where Anza publishes no testnet figure.
     pub disk_gb: Option<f64>,
 }
 
@@ -159,7 +157,6 @@ impl Profile {
                 snapshots_gb: Some(500.0),
                 min_free: 0.15,
                 base_clock_mhz: Some(2800.0),
-                cores: Some(24),
                 disk_gb: Some(512.0),
             },
             Profile::Testnet => Thresholds {
@@ -168,7 +165,6 @@ impl Profile {
                 snapshots_gb: None,
                 min_free: 0.10,
                 base_clock_mhz: Some(2800.0),
-                cores: Some(16),
                 disk_gb: Some(250.0),
             },
             Profile::Local => Thresholds {
@@ -177,7 +173,6 @@ impl Profile {
                 snapshots_gb: None,
                 min_free: 0.05,
                 base_clock_mhz: None,
-                cores: None,
                 disk_gb: None,
             },
         }
@@ -463,9 +458,6 @@ impl Check {
         self.profiles.contains(&p) && (c == ClientKind::Unknown || self.clients.contains(&c))
     }
 
-    /// HW and KRN describe the machine; they answer "can this box run a
-    /// validator" and must run on a host that has none yet. ARG and XDP read a
-    /// validator's configuration and cannot.
     /// Layers that read the machine itself, so they need Linux.
     /// ARG reads a command line and works from text on any OS.
     pub fn needs_a_linux_host(&self) -> bool {

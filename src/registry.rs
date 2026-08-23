@@ -58,7 +58,7 @@ pub static CHECKS: &[Check] = &[
         profiles: &[Testnet, Mainnet],
         clients: ANY_CLIENT,
         needs_root: false,
-        source: hw::S_FLOOR,
+        source: hw::S_CORES,
         run: hw::cores,
     },
     Check {

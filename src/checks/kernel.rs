@@ -81,16 +81,15 @@ fn persisted_in(ctx: &Ctx, key: &str, want: i64) -> Option<String> {
     None
 }
 
-/// `kernel_default` is what this value is on an untouched Linux box. It
-/// matters because Ephemeral means "correct now, gone after a reboot", and a
-/// kernel default is not going anywhere. Without it an adequate default would
-/// be reported as at risk, which is a false alarm and erodes the state's
-/// meaning everywhere else.
+/// `adequate_default` is a stock kernel value that already meets `want`.
+/// Only then is "not persisted" a non-event: the next reboot still has enough.
+/// A Ubuntu-shaped 212992 for rmem is below the floor, so it is not one — if
+/// live is high and no file sets it, that is Ephemeral on every distro.
 fn check_value(
     ctx: &Ctx,
     key: &str,
     want: i64,
-    kernel_default: i64,
+    adequate_default: Option<i64>,
     why: &str,
     source_note: &str,
 ) -> Outcome {
@@ -132,7 +131,7 @@ fn check_value(
                 found: Some(f),
                 expected: SYSCTL_FILE.to_string(),
             }),
-        None if actual <= kernel_default => Outcome::pass(
+        None if adequate_default.is_some_and(|d| actual <= d) => Outcome::pass(
             format!("{key} = {actual}, which is the stock value and already adequate"),
             expected,
         )
@@ -160,7 +159,7 @@ pub fn rmem_max(ctx: &Ctx) -> Outcome {
         ctx,
         "net.core.rmem_max",
         134_217_728,
-        212_992,
+        None,
         WHY_GATED,
         "This is the receive buffer for the UDP paths the validator ingests on.",
     )
@@ -171,7 +170,7 @@ pub fn wmem_max(ctx: &Ctx) -> Outcome {
         ctx,
         "net.core.wmem_max",
         134_217_728,
-        212_992,
+        None,
         WHY_GATED,
         "This is the send buffer counterpart.",
     )
@@ -182,7 +181,7 @@ pub fn max_map_count(ctx: &Ctx) -> Outcome {
         ctx,
         "vm.max_map_count",
         1_000_000,
-        65_530,
+        None,
         WHY_GATED,
         "The accounts database uses a large number of memory mappings; the kernel default is far below what it needs.",
     )
@@ -193,7 +192,7 @@ pub fn nr_open(ctx: &Ctx) -> Outcome {
         ctx,
         "fs.nr_open",
         1_000_000,
-        1_048_576,
+        Some(1_048_576),
         "agave does not check this one, but fs.nr_open is the ceiling for any process's open-file \
          limit. Setting LimitNOFILE=1000000 on a host whose fs.nr_open is lower is silently \
          clamped, and the failure then appears to be about file descriptors rather than about \

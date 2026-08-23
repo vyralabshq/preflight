@@ -279,6 +279,11 @@ fn system_report(ctx: &Ctx, st: &Style, needs_root: usize) -> String {
     format!("{}{}", st.bold("SYSTEM\n"), out.concat())
 }
 
+/// One finding on its own, for `preflight explain`.
+pub fn finding_block(f: &Finding, st: &Style) -> String {
+    finding(f, st, true)
+}
+
 fn finding(f: &Finding, st: &Style, verbose: bool) -> String {
     if !verbose && matches!(f.outcome.status, Status::Pass | Status::Skipped) {
         return String::new();

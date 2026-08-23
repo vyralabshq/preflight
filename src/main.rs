@@ -174,12 +174,34 @@ fn ask_profile(inferred: Profile, reason: &str, st: &Style) -> Profile {
     options[chosen].0
 }
 
-fn explain(id: &str, st: &Style) -> i32 {
+fn explain(id: &str, st: &Style, ctx: &Ctx) -> i32 {
     let Some(c) = registry::find(id) else {
         eprintln!("no such check: {id}");
         return 3;
     };
-    println!("{}  {}", st.bold(c.id), c.title);
+    // Metadata alone is the least useful view of a finding. Run it and print
+    // what it actually says about this machine.
+    let outcome = match c.applies_to(ctx.profile, ctx.client) {
+        true => (c.run)(ctx),
+        false => model::Outcome::skipped(format!(
+            "not applicable to profile {} with client {}",
+            ctx.profile.label(),
+            ctx.client.label()
+        )),
+    };
+    let f = Finding {
+        id: c.id,
+        phase: c.layer.phase(),
+        layer: c.layer.label(),
+        section: c.layer.human(),
+        needs_linux: c.needs_a_linux_host(),
+        severity: c.severity.label(),
+        title: c.title,
+        provisional: c.provisional(),
+        outcome,
+        source: c.source,
+    };
+    print!("{}", render::finding_block(&f, st));
     println!();
     println!("  layer      {}", c.layer.label());
     println!("  severity   {}", c.severity.label());
@@ -224,10 +246,6 @@ fn main() {
         return;
     }
 
-    if let Some(Command::Explain { id }) = &cli.command {
-        std::process::exit(explain(id, &st));
-    }
-
     let ctx = Ctx::probe(CtxOptions {
         root: cli.root.clone(),
         profile: cli.profile.map(Into::into),
@@ -260,6 +278,10 @@ fn main() {
         }
         false => ctx,
     };
+
+    if let Some(Command::Explain { id }) = &cli.command {
+        std::process::exit(explain(id, &st, &ctx));
+    }
 
     let mut findings = Vec::new();
     for c in registry::CHECKS {

@@ -383,7 +383,7 @@ pub static CHECKS: &[Check] = &[
     Check {
         id: "PF-XDP-0001",
         layer: Layer::Xdp,
-        severity: Fatal,
+        severity: Degraded,
         title: "XDP capabilities are in the permitted set",
         profiles: &[Local, Testnet, Mainnet],
         clients: AGAVE,

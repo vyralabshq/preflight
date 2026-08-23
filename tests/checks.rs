@@ -212,8 +212,10 @@ pub fn build(h: &Host) -> PathBuf {
 
     let cpu: String = (0..h.threads)
         .map(|i| {
+            let core = if h.cores == 0 { i } else { i % h.cores };
             format!(
-                "processor\t: {i}\nmodel name\t: {}\ncpu MHz\t\t: {}\ncpu cores\t: {}\nflags\t\t: {}\n\n",
+                "processor\t: {i}\nphysical id\t: 0\ncore id\t\t: {core}\n\
+                 model name\t: {}\ncpu MHz\t\t: {}\ncpu cores\t: {}\nflags\t\t: {}\n\n",
                 h.cpu_model, h.mhz, h.cores, h.flags
             )
         })
@@ -1237,37 +1239,44 @@ fn noatime_is_not_cited_to_anza() {
     assert!(block.contains("Anza does not publish this one"), "{block}");
 }
 
-/// Core count is not the metric. The community list carries 16 core parts that
-/// out-hash 32 core parts, so the check must cite that rather than imply more
-/// cores is better.
+/// Core count is not the metric. Anza lists 12/24 as a guide; the community
+/// list carries 16 core parts that out-hash 32 core parts. Neither is a FAIL.
 #[test]
-fn core_count_check_cites_the_community_list() {
+fn core_count_check_cites_anza_and_the_community_list() {
     let (o, _) = run(&["--root", &host(&FRESH_UBUNTU), "--profile", "testnet", "-v"]);
     let block = block_for(&o, "PF-HW-0004");
     assert!(block.contains("solanahcl.org"), "{block}");
-    assert!(block.contains("16 core"), "{block}");
+    assert!(flat(block).contains("12 cores"), "{block}");
+    assert!(flat(block).contains("RPC column"), "{block}");
     assert!(
         !block.contains("FAIL"),
-        "no published minimum means no failure:\n{block}"
+        "Anza's figure is a guide, not a floor we fail on:\n{block}"
     );
 }
 
-/// Nobody publishes a memory minimum, Anza or the community list, so preflight
-/// must not imply the 512 GB board suggestion is a testnet requirement.
+/// Anza lists 256 GB for validators and 512 GB as board capacity / RPC extra.
+/// Neither is a testnet FAIL — an invented 128 GB floor already false-failed
+/// a working node.
 #[test]
-fn memory_check_does_not_present_512gb_as_required() {
+fn memory_check_names_anza_and_does_not_fail_125gb() {
     let (o, _) = run(&["--root", &host(&FRESH_UBUNTU), "--profile", "testnet", "-v"]);
     let block = block_for(&o, "PF-HW-0005");
-    assert!(block.contains("no published minimum"), "{block}");
+    assert!(flat(block).contains("256 GB"), "{block}");
+    assert!(flat(block).contains("512 GB"), "{block}");
     assert!(
         block.contains("REPORTED"),
-        "a measured value with no threshold is not Unknown:\n{block}"
+        "a measured value with no fail threshold is not Unknown:\n{block}"
     );
-    // the expected line must not name one cluster while another is active
-    let (mainnet, _) = run(&["--root", &host(&FRESH_UBUNTU), "--profile", "mainnet", "-v"]);
+    let small = Host {
+        name: "small-memory",
+        mem_kb: 131_500_000,
+        ..FRESH_UBUNTU
+    };
+    let (o, _) = run(&["--root", &host(&small), "--profile", "testnet", "-v"]);
+    let block = block_for(&o, "PF-HW-0005");
     assert!(
-        !block_for(&mainnet, "PF-HW-0005").contains("testnet runs on far less"),
-        "{mainnet}"
+        !block.contains("FAIL"),
+        "125 GB testnet must stay reported:\n{block}"
     );
 }
 
@@ -1408,11 +1417,11 @@ fn an_unlisted_cpu_is_reported_on_testnet_and_flagged_on_mainnet() {
         "measured but unjudgeable is not a failed probe:\n{block}"
     );
 
-    let (mainnet, _) = run(&["--root", &root, "--profile", "mainnet"]);
+    let (mainnet, _) = run(&["--root", &root, "--profile", "mainnet", "-v"]);
     let block = block_for(&mainnet, "PF-HW-0006");
     assert!(
-        block.contains("FAIL"),
-        "worth flagging on mainnet:\n{block}"
+        block.contains("REPORTED"),
+        "absence from a blog list is not Anza saying no:\n{block}"
     );
     assert!(flat(block).contains("measure your PoH rate"), "{block}");
 
@@ -1691,10 +1700,15 @@ fn the_kernel_floor_belongs_to_the_machine_question() {
 #[test]
 fn the_closing_line_leads_with_the_machine() {
     // Shaped like a working testnet box that is not a mainnet box: valid
-    // configuration, a CPU nobody has reported mainnet numbers for.
+    // configuration, disks that miss Anza's published 1 TB.
     let small = Host {
         name: "mainnet-unsuitable",
         cpu_model: "AMD EPYC 7313P 16-Core Processor",
+        disks: &[
+            ("nvme0n1", 2000, true),
+            ("nvme1n1", 2000, true),
+            ("nvme2n1", 2000, true),
+        ],
         ..XDP_AMBIENT_OK
     };
     let (o, _) = run(&[
@@ -2124,4 +2138,181 @@ fn no_title_touches_its_status() {
             "the status needs clear air after the title:\n{line}"
         );
     }
+}
+
+/// A FAIL with no fix is half a finding, and the option lives on the mount
+/// rather than the path the validator was given.
+#[test]
+fn noatime_says_how_to_set_it() {
+    let atime = Host {
+        name: "no-noatime",
+        mounts: "/dev/nvme0n1p2 / ext4 rw,relatime 0 0\n\
+                 /dev/nvme1n1 /mnt/accounts xfs rw,relatime 0 0\n",
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let (o, _) = run(&[
+        "--root",
+        &host(&atime),
+        "--client",
+        "agave-validator@4.3.0",
+        "--profile",
+        "testnet",
+    ]);
+    let block = block_for(&o, "PF-FS-0004");
+    assert!(block.contains("FAIL"), "{block}");
+    assert!(flat(block).contains("/etc/fstab"), "{block}");
+    assert!(flat(block).contains("remount,noatime"), "{block}");
+    assert!(
+        flat(block).contains("watch the node"),
+        "remounting / deserves the caveat:\n{block}"
+    );
+}
+
+/// Anza's XDP guide names ice next to bnxt_en: do not pass zero-copy.
+#[test]
+fn ice_plus_zero_copy_is_a_fail() {
+    let ice = Host {
+        name: "ice-nic",
+        nic: Some(("eth0", "ice")),
+        ..FRESH_UBUNTU
+    };
+    let inv = invocation(
+        "ice-zero-copy.txt",
+        "exec agave-validator --ledger /l --accounts /a --xdp-interface eth0 --xdp-zero-copy\n",
+    );
+    let (o, _) = run(&[
+        "--root",
+        &host(&ice),
+        "--invocation",
+        inv.to_str().unwrap(),
+        "--client",
+        "agave-validator@4.2.1",
+        "--profile",
+        "testnet",
+    ]);
+    let block = block_for(&o, "PF-NET-0001");
+    assert!(block.contains("FAIL"), "{block}");
+    assert!(flat(block).contains("remove --xdp-zero-copy"), "{block}");
+    assert!(flat(block).contains("Anza"), "{block}");
+}
+
+/// Ambient in the unit is not the process's permitted set. A pid with empty
+/// CapPrm must FAIL even when the drop-in looks right.
+#[test]
+fn xdp_reads_capprm_when_a_process_exists() {
+    let empty = Host {
+        name: "xdp-capprm-empty",
+        files: &[
+            (
+                "/etc/systemd/system/sol.service",
+                "[Service]\nUser=sol\nExecStart=/home/sol/bin/validator.sh\n",
+            ),
+            (
+                "/etc/systemd/system/sol.service.d/20-xdp-caps.conf",
+                "[Service]\nAmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN\n",
+            ),
+            (
+                "/home/sol/bin/validator.sh",
+                "#!/usr/bin/env bash\nexec agave-validator --ledger /mnt/ledger \
+                 --accounts /mnt/accounts --entrypoint entrypoint.testnet.solana.com:8001 \
+                 --dynamic-port-range 8000-8030 --xdp-interface eth0\n",
+            ),
+            (
+                "/proc/42/cmdline",
+                "agave-validator\0--ledger\0/mnt/ledger\0",
+            ),
+            (
+                "/proc/42/status",
+                "Name:\tagave-validat\nUid:\t1001\t1001\t1001\t1001\nCapPrm:\t0000000000000000\n",
+            ),
+            ("/proc/42/cgroup", "0::/system.slice/sol.service\n"),
+        ],
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let (o, _) = run(&[
+        "--root",
+        &host(&empty),
+        "--client",
+        "agave-validator@4.2.1",
+        "--profile",
+        "testnet",
+    ]);
+    let block = block_for(&o, "PF-XDP-0001");
+    assert!(
+        block.contains("FAIL"),
+        "empty CapPrm must not pass:\n{block}"
+    );
+    assert!(flat(block).contains("CapPrm"), "{block}");
+
+    let held = Host {
+        name: "xdp-capprm-held",
+        files: &[
+            (
+                "/etc/systemd/system/sol.service",
+                "[Service]\nUser=sol\nExecStart=/home/sol/bin/validator.sh\n",
+            ),
+            (
+                "/home/sol/bin/validator.sh",
+                "#!/usr/bin/env bash\nexec agave-validator --ledger /mnt/ledger \
+                 --accounts /mnt/accounts --entrypoint entrypoint.testnet.solana.com:8001 \
+                 --dynamic-port-range 8000-8030 --xdp-interface eth0\n",
+            ),
+            (
+                "/proc/42/cmdline",
+                "agave-validator\0--ledger\0/mnt/ledger\0",
+            ),
+            (
+                "/proc/42/status",
+                "Name:\tagave-validat\nUid:\t1001\t1001\t1001\t1001\nCapPrm:\t0000000000003000\n",
+            ),
+            ("/proc/42/cgroup", "0::/system.slice/sol.service\n"),
+        ],
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let (o, _) = run(&[
+        "--root",
+        &host(&held),
+        "--client",
+        "agave-validator@4.2.1",
+        "--profile",
+        "testnet",
+        "-v",
+    ]);
+    let block = block_for(&o, "PF-XDP-0001");
+    assert!(
+        block.contains("PASS"),
+        "live CapPrm is correctness:\n{block}"
+    );
+    let persist = block_for(&o, "PF-XDP-0007");
+    assert!(
+        persist.contains("EPHEMERAL"),
+        "caps without Ambient are setcap:\n{persist}"
+    );
+}
+
+/// Mapper volumes used to vanish because host.rs skipped dm- devices. Now they
+/// are listed, but a volume and the disk beneath it are the same bytes, so only
+/// one of them may count toward a capacity total.
+#[test]
+fn mapper_disks_are_listed_but_not_counted_twice() {
+    let mapper = Host {
+        name: "mapper-disk",
+        disks: &[("dm-0", 960, false), ("nvme0n1", 960, false)],
+        files: &[
+            ("/sys/block/dm-0/dm/name", "accounts\n"),
+            ("/sys/block/dm-0/slaves/nvme0n1/uevent", "\n"),
+        ],
+        ..FRESH_UBUNTU
+    };
+    let (o, _) = run(&["--root", &host(&mapper), "--profile", "mainnet"]);
+    assert!(
+        o.contains("accounts") || o.contains("dm-0"),
+        "mapper volume must show up:\n{o}"
+    );
+    let block = block_for(&o, "PF-FS-0001");
+    assert!(
+        !flat(block).contains("1920 GB"),
+        "960 GB of hardware cannot report 1920:\n{block}"
+    );
+    assert!(flat(block).contains("960 GB"), "{block}");
 }

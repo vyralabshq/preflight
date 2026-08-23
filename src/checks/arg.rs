@@ -32,7 +32,8 @@ const NEEDS_VALUE: &[&str] = &[
     "--known-validator",
     "--expected-shred-version",
     "--dynamic-port-range",
-    "--limit-ledger-size",
+    // --limit-ledger-size is declared min_values(0) in agave's cli, so a bare
+    // flag is legal and belongs nowhere near this list.
     "--limit-blockstore-size",
     "--accounts-db-write-cache-limit",
     "--accounts-index-limit",
@@ -50,13 +51,15 @@ const NEEDS_VALUE: &[&str] = &[
 
 /// PF-ARG-0014. A flag that needs a value, given none.
 pub fn flags_have_values(ctx: &Ctx) -> Outcome {
-    const WHY: &str = "agave-validator takes these flags with a value, and preflight reads the \
-        command line as text, the same way clap receives it. When the token after such a flag is \
-        another flag, the value is gone: clap either consumes the following flag as the value, so \
-        that flag never applies and the number in effect is nonsense, or it refuses the line and \
-        the node does not start. Neither is visible once the process is up, because the running \
-        command line still looks like it has both flags.";
-    const EXPECTED: &str = "a value after every flag that takes one";
+    const WHY: &str = "These flags take a value, and the token after them here is another flag. \
+        Whether that matters is not something preflight can read: clap lets an argument declare \
+        min_values(0), and a flag defined that way is legal bare while its help still prints a \
+        <VALUE> placeholder exactly like a flag that requires one. --limit-ledger-size is \
+        declared that way; others are not. So a running validator is the answer: if agave parsed \
+        this line and started, clap accepted it. Without a running process there is nothing to \
+        settle it, and the risk is that clap consumes the following flag as the value, leaving \
+        that flag silently unapplied.";
+    const EXPECTED: &str = "a value after every flag that requires one";
 
     let inv = match require_invocation(ctx) {
         Ok(i) => i,
@@ -69,6 +72,20 @@ pub fn flags_have_values(ctx: &Ctx) -> Outcome {
         .collect();
     if empty.is_empty() {
         return Outcome::pass("every flag that takes a value has one", EXPECTED).why(WHY);
+    }
+    // The node running on this command line is proof clap accepted it. Failing
+    // here would tell an operator to restart a validator to fix nothing.
+    if inv.pid.is_some() {
+        return Outcome::reported(
+            format!(
+                "no value after {}, on a command line agave is running right now, so clap \
+                 accepted it",
+                empty.join(", ")
+            ),
+            EXPECTED,
+        )
+        .why(WHY)
+        .verify("grep -iE 'purged|cleaning' \"$(ls -t ~/logs/*.log | head -1)\" | tail -3");
     }
     let steps: Vec<FixStep> = empty
         .iter()

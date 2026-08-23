@@ -162,67 +162,23 @@ pub fn capabilities(ctx: &Ctx) -> Outcome {
     let bounding = unit_directive(ctx, "CapabilityBoundingSet");
     let user = unit_directive(ctx, "User");
 
-    // A live process is correctness. The unit grant is persistence (PF-XDP-0007).
-    // Ambient in the unit with a process that was never restarted is a false PASS.
-    if let Some(mask) = runtime_capprm(ctx) {
-        let missing = cap_missing(mask, &state.required);
-        if missing.is_empty() {
-            return Outcome::pass(
-                format!("CapPrm holds {}", cap_held(mask).join(" ")),
-                expected,
-            )
-            .why(WHY_CAPS)
-            .verify("grep CapPrm /proc/$(pgrep -f agave-validator)/status");
-        }
-        // The process is running, so this is never "it will not start". Whether
-        // a restart is the answer depends on which came first: a process older
-        // than the grant picks it up on restart, a newer one already did not.
-        let stale = ambient.is_some() && grant_postdates_launch(ctx) == Some(true);
-        let observed = match stale {
-            true => format!(
-                "the running validator holds no capabilities (CapPrm {mask:016x}), though its \
-                 unit grants {}. It has not been restarted since that was added",
-                state.required.join(" ")
+    // Agave drops every permitted capability it does not need before spawning
+    // threads, so the main thread reading zero is what a healthy v4.0+ node
+    // looks like. A runtime read can therefore confirm a grant arrived and can
+    // never show that one did not. One thread keeps cap_net_admin for netlink,
+    // which is the only positive evidence available after startup.
+    if let Some(mask) = retained_capprm(ctx)
+        && cap_missing(mask, &["CAP_NET_ADMIN"]).is_empty()
+    {
+        return Outcome::pass(
+            format!(
+                "a validator thread still holds {}, so the unit's grant reached the process",
+                cap_held(mask).join(" ")
             ),
-            false if ambient.is_some() => format!(
-                "the running validator holds no capabilities (CapPrm {mask:016x}), though its \
-                 unit grants {}. It was started after that grant was in place, so the grant is \
-                 not reaching the process",
-                state.required.join(" ")
-            ),
-            false => format!(
-                "the running validator holds no capabilities (CapPrm {mask:016x}), missing {}",
-                missing.join(" ")
-            ),
-        };
-        return Outcome::fail(observed, expected)
-            .why(WHY_CAPS)
-            .fix(match (stale, ambient.is_some()) {
-                (true, _) => vec![FixStep::noted(
-                    format!("sudo systemctl restart {}", unit_or(inv)),
-                    "the unit is already correct; only the running process is not",
-                )],
-                // Restarting has already been tried by definition, so sending
-                // them to do it again would cost an outage for nothing. File
-                // capabilities on the binary clear the ambient set at execve,
-                // which is the one thing that explains a bounding set that
-                // applied beside an ambient grant that did not.
-                (false, true) => vec![
-                    FixStep::noted(
-                        format!("getcap {}", inv.program),
-                        "if this prints anything, the kernel wipes the ambient set when systemd \
-                         execs the binary, and no restart will help until it is cleared",
-                    ),
-                    FixStep::noted(
-                        format!("sudo setcap -r {}", inv.program),
-                        "only if the line above printed something. Takes effect at the next \
-                         start, so fold it into a restart you were doing anyway",
-                    ),
-                ],
-                (false, false) => capability_fix(ctx, &state.required, bounding.as_deref()),
-            })
-            .verify("ip link show | grep -i xdp")
-            .persists(Persistence::unit_dropin(ambient, &unit_or(inv)));
+            expected,
+        )
+        .why(WHY_CAPS)
+        .verify("grep CapPrm /proc/$(pgrep -nf agave-validator)/task/*/status | sort -u -k2");
     }
 
     if inv.unit_path.is_none() {
@@ -350,7 +306,7 @@ pub fn capability_persistence(ctx: &Ctx) -> Outcome {
         .persists(Persistence::unit_dropin(ambient, &unit));
     }
 
-    match runtime_capprm(ctx) {
+    match retained_capprm(ctx) {
         None => Outcome::unknown(
             "no AmbientCapabilities in the unit, and no running validator whose permitted set could be read",
         )
@@ -360,11 +316,20 @@ pub fn capability_persistence(ctx: &Ctx) -> Outcome {
              reports that rather than assuming setcap.",
         )
         .verify("getcap $(which agave-validator)"),
-        Some(0) => Outcome::fail("no AmbientCapabilities in the unit and the running validator holds no permitted capabilities",
-            "capabilities granted by an AmbientCapabilities drop-in",
+        // Agave drops what it does not need at startup, so an empty union is
+        // equally consistent with no grant and with a grant already spent.
+        // Failing on it would call a healthy node broken.
+        Some(0) => Outcome::unknown(
+            "no AmbientCapabilities in the unit, and no validator thread still holds a permitted \
+             capability",
         )
-        .why("This is not an ephemeral grant, it is no grant. See PF-XDP-0001.")
-        .verify("grep CapPrm /proc/$(pgrep -f agave-validator)/status"),
+        .expected("capabilities granted by an AmbientCapabilities drop-in")
+        .why(
+            "Agave drops every permitted capability its configuration does not need before \
+             spawning threads, so nothing held after startup is not evidence that nothing was \
+             granted. Only the unit can answer this one.",
+        )
+        .verify("getcap $(which agave-validator)"),
         Some(_) => Outcome::ephemeral(
             "validator holds permitted capabilities, but the unit grants none, so they come from setcap on the binary",
             "capabilities granted by an AmbientCapabilities drop-in",
@@ -384,32 +349,30 @@ pub fn capability_persistence(ctx: &Ctx) -> Outcome {
     }
 }
 
-fn runtime_capprm(ctx: &Ctx) -> Option<u64> {
+/// The union of every thread's permitted set. Agave keeps cap_net_admin on one
+/// thread and drops the rest, so the main thread alone says nothing.
+fn retained_capprm(ctx: &Ctx) -> Option<u64> {
     let pid = ctx.validator_pid.as_ref()?;
     if !crate::privilege::valid_pid(&ctx.fs, pid) {
         return None;
     }
-    let status = ctx.fs.read(format!("/proc/{pid}/status")).ok()?;
-    let line = status.lines().find(|l| l.starts_with("CapPrm:"))?;
-    u64::from_str_radix(line.split_whitespace().nth(1)?, 16).ok()
-}
-
-/// True when the unit or a drop-in was written after the process started, so a
-/// restart would pick up something the running process never saw. The /proc
-/// entry's mtime is the process start time, which needs no exec to read.
-fn grant_postdates_launch(ctx: &Ctx) -> Option<bool> {
-    let inv = ctx.inv()?;
-    let pid = inv.pid.as_ref()?;
-    let started = std::fs::metadata(ctx.fs.at(format!("/proc/{pid}")))
-        .ok()?
-        .modified()
-        .ok()?;
-    let unit = inv.unit_path.as_ref()?;
-    let mut newest = std::fs::metadata(ctx.fs.at(unit)).ok()?.modified().ok()?;
-    for p in ctx.fs.list(format!("{unit}.d")) {
-        if let Ok(t) = std::fs::metadata(&p).and_then(|m| m.modified()) {
-            newest = newest.max(t);
+    let mut union = 0u64;
+    let mut saw_one = false;
+    for task in ctx.fs.list(format!("/proc/{pid}/task")) {
+        let Ok(status) = std::fs::read_to_string(task.join("status")) else {
+            continue;
+        };
+        let Some(line) = status.lines().find(|l| l.starts_with("CapPrm:")) else {
+            continue;
+        };
+        if let Some(m) = line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|v| u64::from_str_radix(v, 16).ok())
+        {
+            union |= m;
+            saw_one = true;
         }
     }
-    Some(newest > started)
+    saw_one.then_some(union)
 }

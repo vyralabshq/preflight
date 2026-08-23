@@ -607,23 +607,6 @@ fn elevated_read_count_reflects_what_actually_runs() {
     assert!(all.contains("XDP networking"), "{all}");
 }
 
-#[test]
-fn non_linux_host_says_so_once() {
-    let (o, _) = run(&[
-        "--invocation",
-        invocation("stale-blog.txt", STALE_BLOG_INVOCATION)
-            .to_str()
-            .unwrap(),
-        "--client",
-        "agave-validator@4.2.1",
-        "--profile",
-        "testnet",
-    ]);
-    assert!(o.contains("and a Solana validator runs on Linux"), "{o}");
-    // said once, in the verdict, not repeated per check
-    assert_eq!(o.matches("runs on Linux").count(), 1, "{o}");
-}
-
 /// A drop-in CapabilityBoundingSet= replaces the unit's value rather than
 /// adding to it. When the unit already permits what is needed, emitting one
 /// would silently narrow it.

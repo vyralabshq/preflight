@@ -2372,3 +2372,50 @@ fn a_grant_the_process_predates_asks_for_a_restart() {
         "it is running; that is how preflight read its CapPrm:\n{block}"
     );
 }
+
+/// A required value swallowed by the next flag is invisible once the process
+/// is up: the running command line still shows both flags.
+#[test]
+fn a_flag_that_lost_its_value_is_a_finding() {
+    let lost = Host {
+        name: "flag-without-value",
+        files: &[
+            (
+                "/etc/systemd/system/sol.service",
+                "[Service]\nUser=sol\nExecStart=/home/sol/bin/validator.sh\n",
+            ),
+            (
+                "/home/sol/bin/validator.sh",
+                "#!/usr/bin/env bash\nexec agave-validator \\\n\
+                 --identity /home/sol/validator-keypair.json \\\n\
+                 --vote-account /home/sol/vote-account-keypair.json \\\n\
+                 --entrypoint entrypoint.testnet.solana.com:8001 \\\n\
+                 --ledger /mnt/ledger \\\n\
+                 --accounts /mnt/accounts \\\n\
+                 --limit-blockstore-size \\\n\
+                 --accounts-db-write-cache-limit 10GB\n",
+            ),
+        ],
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let (o, _) = run(&[
+        "--root",
+        &host(&lost),
+        "--client",
+        "agave-validator@4.3.0",
+        "--profile",
+        "testnet",
+        "-v",
+    ]);
+    let block = block_for(&o, "PF-ARG-0014");
+    assert!(block.contains("FAIL"), "{block}");
+    assert!(
+        flat(block).contains("--limit-blockstore-size"),
+        "name the flag that lost it:\n{block}"
+    );
+    // The flag it swallowed still parses as present, which is the trap.
+    assert!(
+        block_for(&o, "PF-ARG-0011").contains("PASS"),
+        "0011 sees the flag and cannot see the missing value; 0014 is why it exists"
+    );
+}

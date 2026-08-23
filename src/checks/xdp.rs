@@ -174,14 +174,20 @@ pub fn capabilities(ctx: &Ctx) -> Outcome {
             .why(WHY_CAPS)
             .verify("grep CapPrm /proc/$(pgrep -f agave-validator)/status");
         }
-        // The process is running, so this is never "it will not start". The
-        // bounding set matching the unit while ambient does not is the tell:
-        // the grant was added to the unit after this process was launched.
-        let stale = ambient.is_some();
+        // The process is running, so this is never "it will not start". Whether
+        // a restart is the answer depends on which came first: a process older
+        // than the grant picks it up on restart, a newer one already did not.
+        let stale = ambient.is_some() && grant_postdates_launch(ctx) == Some(true);
         let observed = match stale {
             true => format!(
                 "the running validator holds no capabilities (CapPrm {mask:016x}), though its \
                  unit grants {}. It has not been restarted since that was added",
+                state.required.join(" ")
+            ),
+            false if ambient.is_some() => format!(
+                "the running validator holds no capabilities (CapPrm {mask:016x}), though its \
+                 unit grants {}. It was started after that grant was in place, so the grant is \
+                 not reaching the process",
                 state.required.join(" ")
             ),
             false => format!(
@@ -191,12 +197,29 @@ pub fn capabilities(ctx: &Ctx) -> Outcome {
         };
         return Outcome::fail(observed, expected)
             .why(WHY_CAPS)
-            .fix(match stale {
-                true => vec![FixStep::noted(
+            .fix(match (stale, ambient.is_some()) {
+                (true, _) => vec![FixStep::noted(
                     format!("sudo systemctl restart {}", unit_or(inv)),
                     "the unit is already correct; only the running process is not",
                 )],
-                false => capability_fix(ctx, &state.required, bounding.as_deref()),
+                // Restarting has already been tried by definition, so sending
+                // them to do it again would cost an outage for nothing. File
+                // capabilities on the binary clear the ambient set at execve,
+                // which is the one thing that explains a bounding set that
+                // applied beside an ambient grant that did not.
+                (false, true) => vec![
+                    FixStep::noted(
+                        format!("getcap {}", inv.program),
+                        "if this prints anything, the kernel wipes the ambient set when systemd \
+                         execs the binary, and no restart will help until it is cleared",
+                    ),
+                    FixStep::noted(
+                        format!("sudo setcap -r {}", inv.program),
+                        "only if the line above printed something. Takes effect at the next \
+                         start, so fold it into a restart you were doing anyway",
+                    ),
+                ],
+                (false, false) => capability_fix(ctx, &state.required, bounding.as_deref()),
             })
             .verify("ip link show | grep -i xdp")
             .persists(Persistence::unit_dropin(ambient, &unit_or(inv)));
@@ -369,4 +392,24 @@ fn runtime_capprm(ctx: &Ctx) -> Option<u64> {
     let status = ctx.fs.read(format!("/proc/{pid}/status")).ok()?;
     let line = status.lines().find(|l| l.starts_with("CapPrm:"))?;
     u64::from_str_radix(line.split_whitespace().nth(1)?, 16).ok()
+}
+
+/// True when the unit or a drop-in was written after the process started, so a
+/// restart would pick up something the running process never saw. The /proc
+/// entry's mtime is the process start time, which needs no exec to read.
+fn grant_postdates_launch(ctx: &Ctx) -> Option<bool> {
+    let inv = ctx.inv()?;
+    let pid = inv.pid.as_ref()?;
+    let started = std::fs::metadata(ctx.fs.at(format!("/proc/{pid}")))
+        .ok()?
+        .modified()
+        .ok()?;
+    let unit = inv.unit_path.as_ref()?;
+    let mut newest = std::fs::metadata(ctx.fs.at(unit)).ok()?.modified().ok()?;
+    for p in ctx.fs.list(format!("{unit}.d")) {
+        if let Ok(t) = std::fs::metadata(&p).and_then(|m| m.modified()) {
+            newest = newest.max(t);
+        }
+    }
+    Some(newest > started)
 }

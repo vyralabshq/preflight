@@ -1,77 +1,69 @@
 # preflight
 
 A read-only CLI that tells you whether a Linux box can run a Solana validator,
-and if it cannot, exactly what is missing and how to fix it yourself.
+and if it cannot, what is missing and how to fix it.
 
 Built and maintained by [vyralabshq](https://github.com/vyralabshq).
 
-## Three promises
+## What it does
 
-1. **It never writes to your system.** No installing, configuring or restarting. The only file it creates is a report you ask for with `--out`.
-2. **It never runs a command you have not seen.** One command, ever: `<your validator> --version`, unprivileged, printed in every report. `--no-exec` disables even that. It never uses sudo. Checks needing an elevated read print the command for you to run.
-3. **It never guesses.** If it cannot read something it says `UNKNOWN` and why. It prints no fix it is unsure of, and no threshold it cannot cite.
-
-## What it answers
-
-Two questions, in that order, because a box that cannot run a validator makes
-every finding about a validator's configuration beside the point.
+It answers two questions, in this order, because a machine that cannot run a
+validator makes every question about a validator's configuration beside the
+point.
 
 **Can this machine run a validator?** Works on a bare box with nothing
-installed. Covers CPU, memory and architecture; the kernel values agave refuses
-to start without; and disks, filesystems and free space.
+installed. CPU, memory, disks, filesystems, free space, and the kernel values
+agave refuses to start without.
 
-**Is the validator configured correctly?** Needs one installed. Covers whether
-the command line survived the last upgrade, and the Linux capabilities the v4.2
-XDP transmit path requires.
+**Is the validator configured correctly?** Needs one installed. Whether the
+command line survived the last upgrade, and whether the Linux capabilities the
+XDP transmit path needs actually reached the process.
 
-35 checks today, across hardware, kernel, disks, one network card check, the validator command line and XDP capabilities. Process limits, systemd and security are not built yet. Firedancer is detected and skipped rather than checked.
+36 checks: 7 hardware, 5 kernel, 7 filesystem, 1 network card, 14 command line,
+2 XDP capability. Process limits, systemd and security are not built. Firedancer
+is detected and skipped rather than checked.
 
-## What a run looks like
+## How it helps
 
-A fresh Ubuntu box, nothing installed, asked about a testnet validator.
+Validator problems do not announce themselves. A sysctl below agave's floor stops
+the node from starting, but only after a snapshot download. A renamed flag still
+parses, so nothing looks wrong until the setting it controlled quietly stops
+applying. A capability granted in the wrong systemd directive leaves the permitted
+set empty and the node runs without the thing you set up.
+
+preflight finds those before they cost you an outage, and cites where each
+requirement comes from so you can check the claim rather than trust it.
+
+It never writes to your system, never uses sudo, and runs exactly one command:
+`<your validator> --version`, unprivileged and printed in every report.
+`--no-exec` disables even that. When it cannot read something it says `UNKNOWN`
+and why, rather than guessing.
+
+## What you see
+
+Every finding has the same shape: what is there, what should be, why it matters,
+what to run, how to confirm it worked, and where the requirement comes from.
 
 ```
-preflight 0.1.0
-
-SYSTEM
-  cpu         AMD EPYC 9354P 32-Core Processor
-              32 cores  ·  64 threads  ·  3800 MHz  ·  AVX2 yes
-  memory      504 GB  ·  no swap
-  disks       sda              500 GB  SSD or NVMe
-  storage     /             ext4    free space not measured
-              /mnt/accounts ext4    free space not measured
-              /mnt/ledger   ext4    free space not measured
-  os          Ubuntu 24.04.1 LTS  ·  kernel 6.8.0-31-generic
-  validator   none installed
-  preflight   read-only, running as uid 501, 1 check needs elevated reads
-
-CAN THIS MACHINE RUN A TESTNET VALIDATOR?
-  no. 4 things must be fixed first
-
-  ...
-
-Kernel settings
-
-  PF-KRN-0001  net.core.rmem_max                               FAIL  fatal
+  PF-KRN-0001  net.core.rmem_max                                 FAIL  fatal
 
   observed  net.core.rmem_max = 212992
   expected  net.core.rmem_max at or above 134217728
-  why       agave refuses to start when this is below its recommendation, so
-            the node does not boot. Catching it here saves a snapshot download.
+  why       agave calls check_os_network_limits() before it opens the ledger and
+            returns an error if this value is below its recommendation, so the
+            validator refuses to start. It is not a tuning preference. The value
+            preflight adds is catching it before a multi-hour snapshot download
+            rather than after. This is the receive buffer for the UDP paths the
+            validator ingests on.
   fix       echo 'net.core.rmem_max = 134217728' | sudo tee -a /etc/sysctl.d/21-agave-validator.conf
             sudo sysctl -p /etc/sysctl.d/21-agave-validator.conf
             (applies it now; the file is what makes it survive a reboot)
   verify    cat /proc/sys/net/core/rmem_max
   source    INTERESTING_LIMITS [v4.2.1] · check_os_network_limits() [v4.2.1]
-
-  ...
-
-IS THE VALIDATOR CONFIGURED CORRECTLY?
-  no validator installed, nothing to check
-
-next      4 fatal findings stop the validator from starting
-          preflight explain <id>  for one finding on its own
 ```
+
+A run opens with what the machine is and closes with what to do first. Passing
+checks are listed by name, so you can see what was looked at.
 
 ## Install
 
@@ -79,72 +71,68 @@ next      4 fatal findings stop the validator from starting
 cargo install --git https://github.com/vyralabshq/preflight
 ```
 
-From a clone: `make install` puts it on your PATH, `make` lists the rest.
+From a clone, `make install` puts it on your PATH and `make` lists the rest.
 
-Nothing needs to go on the validator itself if you would rather not. See
-`--invocation` and `--root` below.
+Nothing has to go on the validator itself. See `--invocation` and `--root`.
 
 ## Commands
 
 ```
-preflight                     check this machine
-preflight explain PF-KRN-0001 one check's docs and sources, runs nothing
-preflight --help              everything below
+preflight                       check this machine
+preflight --profile mainnet     judge it against a different cluster
+preflight -v                    show passing and skipped checks too
+preflight explain PF-KRN-0001   one finding on its own
+preflight --dump-registry       every check and its source, then exit
+preflight --help                everything below
 ```
 
-On a validator host, `preflight` with no arguments detects the client, its
-version, where its command line lives, and what the machine is.
+With no arguments it detects the client, its version, where its command line
+lives, and what the machine is.
 
 ## Flags
 
 | Flag | What it does |
 |---|---|
 | `--profile <local\|testnet\|mainnet>` | What the machine is judged against. Detected when not given |
-| `--only <ids or layers>` | Run a subset: `--only ARG`, `--only PF-KRN-0001,FS` |
-| `--skip <ids or layers>` | Same syntax, inverted |
+| `--only <ids or layers>` | Run a subset: `--only ARG`, `--only PF-KRN-0001,FS`. `--skip` is the inverse |
 | `--format <text\|json\|markdown>` | `json` for CI, `markdown` for pasting into a thread |
 | `--out <path>` | Write the report to a file. The only file preflight writes |
 | `--no-color` | Plain output |
-| `-v`, `--verbose` | Show passing and skipped checks too |
-| `--invocation <file>` | Read a command line from a file instead of the host, so you can check someone else's node from your laptop |
-| `--client <name@version>` | Override client detection. Needed with `--invocation`, since text has no version to read |
+| `--invocation <file>` | Read a command line from a file, so you can check someone else's node from your laptop |
+| `--client <name@version>` | Override client detection. Needed with `--invocation`, since text carries no version |
 | `--root <dir>` | Read a captured directory tree instead of this machine |
 | `--no-exec` | Run nothing at all, then supply `--client` yourself |
-| `--dump-registry` | Print every check with its source and exit |
 
-## Exit codes and states
+## Exit codes
 
 | Code | |
 |---|---|
 | 0 | everything applicable passed |
 | 1 | a `FAIL`, or an `UNSUPPORTED` that no command can fix |
 | 2 | an `EPHEMERAL`: correct now, gone after a reboot |
-| 4 | an `UNKNOWN`: the run was incomplete, not clean |
 | 3 | internal error |
+| 4 | an `UNKNOWN`: the run was incomplete, not clean |
 
-`EPHEMERAL` and `UNSUPPORTED` are the two that matter. The first catches a
-setting that works today and vanishes on reboot. The second is an honest no,
-printed without a fix because none exists. Code 4 exists so an incomplete run
-cannot be mistaken for a clean one.
+`EPHEMERAL` catches a setting that works today and vanishes on the next reboot.
+`UNSUPPORTED` is an honest no, printed without a fix because none exists. Code 4
+exists so an incomplete run cannot be mistaken for a clean one.
 
 ## Every check is cited
 
 Each names where its requirement comes from, an agave symbol or a section of a
-named release's changelog, plus the version it was last verified against. A
-check sourced to an unreleased channel is marked provisional and cannot fire
-against a client that exists. `preflight --dump-registry` prints the full list.
+named release's changelog, plus the version it was last verified against. Where
+no source publishes a figure, the check says so and reports the number instead
+of inventing a threshold. `preflight --dump-registry` prints the full list, and
+[`docs/registry.md`](docs/registry.md) is that list committed, so a change to any
+check's source or severity shows up as a diff.
 
 ## Status
 
-Early, and honest about it. Every check is verified against fixtures, not yet
-against a real validator host. That is the next thing.
-
-preflight does not yet run anything with sudo. Checks needing an elevated read
-say so and print the command. The allowlist they will come from is
-[`src/privilege.rs`](src/privilege.rs), kept short enough to read in a minute.
-
-`scripts/pf-dump.sh` captures a read-only snapshot of a host for building
-fixtures. It redacts metrics credentials and never reads keypairs.
+Early. Checks run against fixtures in CI and against a live testnet validator.
+Checks needing an elevated read print the command instead of running it; the
+allowlist is [`src/privilege.rs`](src/privilege.rs). `scripts/pf-dump.sh`
+captures a host snapshot for fixtures, redacting metrics credentials and never
+reading keypairs.
 
 ## Licence
 

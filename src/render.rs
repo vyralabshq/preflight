@@ -391,7 +391,14 @@ fn passing(findings: &[&Finding], st: &Style, verbose: bool) -> String {
         .iter()
         .filter(|f| f.outcome.status == Status::Pass)
         .collect();
-    passed.sort_by_key(|f| f.id);
+    // Registry order, so the passing list reads in the same sequence as the
+    // findings above it rather than alphabetically.
+    passed.sort_by_key(|f| {
+        crate::registry::CHECKS
+            .iter()
+            .position(|c| c.id == f.id)
+            .unwrap_or(usize::MAX)
+    });
     if passed.is_empty() {
         return String::new();
     }
@@ -700,7 +707,8 @@ fn summary(ctx: &Ctx, findings: &[Finding], st: &Style) -> String {
         ));
     } else if advisory > 0 {
         line.push_str(&format!(
-            "\nnext      nothing is wrong. {advisory} thing{} worth doing\n",
+            "\nnext      nothing here stops this machine running. {advisory} thing{} worth \
+             doing\n",
             plural(advisory, " is", "s are")
         ));
     }

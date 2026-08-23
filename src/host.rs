@@ -73,6 +73,10 @@ pub struct Disk {
     pub name: String,
     pub size_gb: f64,
     pub rotational: bool,
+    /// A view of other devices rather than hardware of its own. Listed, but
+    /// never added to a capacity total: a mapper volume and the disk under it
+    /// are the same bytes counted twice.
+    pub mapped: bool,
 }
 
 pub struct Mount {
@@ -80,6 +84,33 @@ pub struct Mount {
     pub fstype: String,
     pub free_gb: Option<f64>,
     pub total_gb: Option<f64>,
+}
+
+/// cpuinfo's "cpu cores" is per socket, so a dual socket box under-counts.
+/// Unique (physical id, core id) pairs are the real number.
+pub fn physical_cores(info: &str) -> Option<usize> {
+    let mut seen = std::collections::BTreeSet::new();
+    let (mut socket, mut core) = (None, None);
+    for line in info.lines() {
+        let value = || {
+            line.split(':')
+                .nth(1)
+                .and_then(|v| v.trim().parse::<u32>().ok())
+        };
+        match line {
+            _ if line.starts_with("physical id") => socket = value(),
+            _ if line.starts_with("core id") => core = value(),
+            _ => continue,
+        }
+        if let (Some(s), Some(c)) = (socket, core) {
+            seen.insert((s, c));
+            (socket, core) = (None, None);
+        }
+    }
+    match seen.is_empty() {
+        false => Some(seen.len()),
+        true => field(info, "cpu cores").and_then(|v| v.parse().ok()),
+    }
 }
 
 fn field<'a>(text: &'a str, key: &str) -> Option<&'a str> {
@@ -98,7 +129,7 @@ pub fn gather(fs: &Rootfs) -> Facts {
             .map(str::to_string);
         f.threads =
             Some(info.lines().filter(|l| l.starts_with("processor")).count()).filter(|n| *n > 0);
-        f.cores = field(&info, "cpu cores").and_then(|v| v.parse().ok());
+        f.cores = physical_cores(&info);
         f.mhz = field(&info, "cpu MHz").and_then(|v| v.parse().ok());
         let flags = info
             .lines()
@@ -122,7 +153,7 @@ pub fn gather(fs: &Rootfs) -> Facts {
         let Some(name) = dev.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if name.starts_with("loop") || name.starts_with("ram") || name.starts_with("dm-") {
+        if name.starts_with("loop") || name.starts_with("ram") {
             continue;
         }
         let sectors: Option<f64> = std::fs::read_to_string(dev.join("size"))
@@ -134,10 +165,19 @@ pub fn gather(fs: &Rootfs) -> Facts {
         if let Some(s) = sectors
             && s > 0.0
         {
+            let mapped = std::fs::read_dir(dev.join("slaves"))
+                .map(|mut d| d.next().is_some())
+                .unwrap_or(false);
+            let label = std::fs::read_to_string(dev.join("dm/name"))
+                .ok()
+                .map(|n| n.trim().to_string())
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| name.to_string());
             f.disks.push(Disk {
-                name: name.to_string(),
+                name: label,
                 size_gb: s * 512.0 / 1e9,
                 rotational: rot,
+                mapped,
             });
         }
     }

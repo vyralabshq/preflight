@@ -217,11 +217,7 @@ fn require_version(ctx: &Ctx, major: u64, minor: u64) -> Result<(), Box<Outcome>
     }
 }
 
-/// The file an operator edits and the service they restart, both resolved
-/// during invocation lookup. Without this a fix says "edit the unit or wrapper
-/// script", which is the exact thing preflight just worked out for them.
-/// Every fix in this layer is the same three moves: open the file that holds
-/// the command line, change something in it, restart the unit that runs it.
+/// Open the file that holds the command line, apply the change, restart the unit.
 fn edit_steps(ctx: &Ctx, changes: Vec<FixStep>) -> Vec<FixStep> {
     let mut steps = vec![match ctx.inv().and_then(|i| i.edit_target.clone()) {
         Some(f) => FixStep::cmd(format!("edit {f}")),
@@ -246,11 +242,7 @@ fn edit_target_or(ctx: &Ctx) -> String {
         .unwrap_or_else(|| "<your validator command line>".to_string())
 }
 
-/// The resolved unit name, or a placeholder. preflight never guesses a unit
-/// name: "sol.service" is only a convention in Anza's guide, and printing it on
-/// a host that uses a different one hands the operator a command that silently
-/// targets nothing.
-/// The edit-this-file wrapper around a single rename step.
+/// Never print `sol.service` as a guess: it is only Anza's example unit name.
 fn unit_or_placeholder(ctx: &Ctx) -> String {
     ctx.inv()
         .and_then(|i| i.unit_name.clone())

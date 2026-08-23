@@ -56,7 +56,8 @@ const DRIVERS: &[DriverSupport] = &[
         // Anza's guide names ice alongside bnxt_en as a driver not to pass
         // zero copy with, whatever the community table reports.
         zero_copy: Xdp::No,
-        note: "Supports native XDP and zero copy. XDP is blocked for frames larger than 3KB.",
+        note: "Anza's XDP guide: do not pass --xdp-zero-copy with ice (or bnxt_en). Plain XDP \
+               still works. The community table lists zero copy; the guide wins.",
     },
     DriverSupport {
         driver: "igb",

@@ -307,6 +307,7 @@ fn launches_a_validator(fs: &Rootfs, text: &str) -> bool {
 fn unit_files(fs: &Rootfs) -> Vec<std::path::PathBuf> {
     let mut v = fs.list("/etc/systemd/system");
     v.extend(fs.list("/lib/systemd/system"));
+    v.extend(fs.list("/usr/lib/systemd/system"));
     v.retain(|p| p.extension().is_some_and(|e| e == "service"));
     v
 }

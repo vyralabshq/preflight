@@ -18,15 +18,12 @@ pub const S_REQ: &[Source] = &[Source {
     provisional: false,
 }];
 
-/// The community hardware list, which records what operators actually run and
-/// what PoH rate each part reaches. Anza publishes no core or memory minimum,
-/// so this is the closest thing to evidence.
-/// Figures nobody publishes, carried as what they are: an operator floor from
-/// running these clusters, never dressed up as Anza's.
-pub const S_FLOOR: &[Source] = &[
+/// Cores: Anza's published 12/24, plus the community list that shows why
+/// clock still dominates.
+pub const S_CORES: &[Source] = &[
     Source {
-        kind: Operator,
-        locator: "operator floor, not published by Anza",
+        kind: AnzaDocs,
+        locator: "docs.anza.xyz/operations/requirements",
         verified_against: "2026-08",
         provisional: false,
     },
@@ -173,14 +170,16 @@ pub fn base_clock(ctx: &Ctx) -> Outcome {
     }
 }
 
-/// PF-HW-0004. Cores. Reported, never failed: Anza publishes no minimum.
+/// PF-HW-0004. Cores. Reported: Anza lists 12/24 as a guide, and clock dominates.
 pub fn cores(ctx: &Ctx) -> Outcome {
-    const WHY: &str = "Anza publishes no core count for validators; the 12 cores and 24 threads \
-        in its table are the RPC column. Clock still dominates, and the community list shows why: \
-        a 16 core Ryzen 9950X reaches about 23M PoH hashes per second while a 32 core EPYC 9354P \
-        reaches 14M to 16M. But cores decide how much else fits beside the PoH thread, so the \
-        figures below are an operator floor from running these clusters rather than anything Anza \
-        states: 16 cores carries testnet, and mainnet wants 24.";
+    const WHY: &str = "Anza's validator column lists 12 cores / 24 threads or more, and says \
+        higher clock speed is preferable over more cores. The 16 cores / 32 threads line is the \
+        RPC column. Clock still dominates, and the community list shows why: a 16 core Ryzen \
+        9950X reaches about 23M PoH hashes per second while a 32 core EPYC 9354P reaches 14M to \
+        16M. preflight will not fail a box against the core count: an invented floor already \
+        failed machines Anza's own table accepts, and Proof of History is a single-core chain.";
+    const EXPECTED: &str =
+        "Anza lists 12 cores / 24 threads for validators; preflight does not fail on the figure";
 
     if let Some(o) = needs_linux(ctx, WHY) {
         return o;
@@ -189,68 +188,27 @@ pub fn cores(ctx: &Ctx) -> Outcome {
         return Outcome::unknown("cannot read /proc/cpuinfo").why(WHY);
     };
     let threads = info.lines().filter(|l| l.starts_with("processor")).count();
-    let physical = physical_cores(&info);
+    let physical = crate::host::physical_cores(&info);
     let observed = match physical {
         Some(p) => format!("{p} physical cores, {threads} threads"),
         None => format!("{threads} threads, physical core count not reported"),
     };
-    let Some(want) = ctx.profile.thresholds().cores else {
-        return Outcome::reported(observed, "no floor on this profile").why(WHY);
-    };
-    let expected = format!("{want} physical cores for {}", ctx.profile.label());
-    match physical {
-        None => Outcome::reported(observed, expected).why(WHY),
-        Some(p) if p >= want => Outcome::pass(observed, expected).why(WHY),
-        Some(_) => Outcome::fail(observed, expected)
-            .why(WHY)
-            .fix(vec![FixStep::noted(
-                format!("run this one on a box with {want} cores or more"),
-                "nothing on this machine changes its core count, so this is a hardware decision",
-            )]),
+    match ctx.profile {
+        Profile::Local => Outcome::pass(observed, "enough for a test validator").why(WHY),
+        _ => Outcome::reported(observed, EXPECTED).why(WHY),
     }
 }
 
-/// cpuinfo's "cpu cores" is per socket, so a dual socket box under-counts.
-/// Unique (physical id, core id) pairs are the real number.
-fn physical_cores(info: &str) -> Option<usize> {
-    let mut seen = std::collections::BTreeSet::new();
-    let (mut socket, mut core) = (None, None);
-    for line in info.lines() {
-        let value = || {
-            line.split(':')
-                .nth(1)
-                .and_then(|v| v.trim().parse::<u32>().ok())
-        };
-        match line {
-            _ if line.starts_with("physical id") => socket = value(),
-            _ if line.starts_with("core id") => core = value(),
-            _ => continue,
-        }
-        if let (Some(s), Some(c)) = (socket, core) {
-            seen.insert((s, c));
-            (socket, core) = (None, None);
-        }
-    }
-    match seen.is_empty() {
-        false => Some(seen.len()),
-        // Single socket kernels may omit the topology lines entirely.
-        true => info
-            .lines()
-            .find(|l| l.starts_with("cpu cores"))
-            .and_then(|l| l.split(':').nth(1))
-            .and_then(|v| v.trim().parse().ok()),
-    }
-}
-
-/// PF-HW-0005. RAM. Anza suggests a 512 GB-capable board, which is guidance
-/// rather than a floor, so this reports and warns instead of failing.
+/// PF-HW-0005. RAM. Anza lists 256 GB as a guide; 512 GB is the board and RPC extra.
 pub fn memory(ctx: &Ctx) -> Outcome {
-    const WHY: &str = "Anza suggests a board with 512 GB capacity and ECC memory, without saying \
-        which cluster that is for, and publishes no minimum. Neither does the community hardware \
-        list. Operators run testnet on far less. Accounts and index live in memory, so running \
-        short shows up as an OOM kill hours into a run rather than at startup, which is why the \
-        figure is worth seeing even though nobody will tell you what it should be.";
-    const EXPECTED: &str = "no published minimum for any cluster";
+    const WHY: &str = "Anza's validator column lists 256 GB or more, suggests ECC, and suggests a \
+        motherboard with 512 GB capacity. The 512 GB or more line is extra RAM for an RPC node \
+        with all account indexes, not the validator floor. The page calls these a guide, and \
+        operators run testnet on far less — an invented 128 GB floor already false-failed a \
+        working 125 GB testnet node. Accounts and index live in memory, so running short shows \
+        up as an OOM kill hours into a run rather than at startup, which is why the figure is \
+        worth seeing. preflight still does not fail on it.";
+    const EXPECTED: &str = "Anza lists 256 GB for validators and 512 GB board capacity; preflight does not fail on either";
 
     if let Some(o) = needs_linux(ctx, WHY) {
         return o;
@@ -320,19 +278,22 @@ pub fn on_recommended_list(ctx: &Ctx) -> Outcome {
     // Model strings carry suffixes like "16-Core Processor" that the list omits.
     let listed = RECOMMENDED.iter().find(|(name, _, _)| model.contains(name));
 
-    match (listed, ctx.profile) {
-        (Some((name, clock, poh)), _) => Outcome::pass(
+    match listed {
+        Some((name, clock, poh)) => Outcome::pass(
             format!("{name} is on the list, base {clock}, reported PoH {poh}"),
             EXPECTED,
         )
         .why(WHY),
-        (None, Profile::Mainnet) => Outcome::fail(format!("{model} is not on the list"), EXPECTED)
-            .why(WHY)
-            .fix(vec![FixStep::noted(
-                "measure your PoH rate before taking stake, and compare against the list",
-                "the listed parts report roughly 14M to 23M hashes per second",
-            )]),
-        (None, _) => Outcome::reported(format!("{model} is not on the list"), EXPECTED).why(WHY),
+        None => {
+            let o = Outcome::reported(format!("{model} is not on the list"), EXPECTED).why(WHY);
+            match ctx.profile {
+                Profile::Mainnet => o.fix(vec![FixStep::noted(
+                    "measure your PoH rate before taking stake, and compare against the list",
+                    "absence from a community list is not Anza saying no; the listed parts report roughly 14M to 23M hashes per second",
+                )]),
+                _ => o,
+            }
+        }
     }
 }
 

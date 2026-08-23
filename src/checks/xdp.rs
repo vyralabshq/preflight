@@ -3,6 +3,7 @@
 //! agave-validator on Linux hits the v4.2 capability gate like any other node.
 
 use crate::{
+    checks::unit_directive,
     ctx::Ctx,
     model::{ClientKind, FixStep, Outcome, Persistence, Source, SourceKind::*},
 };
@@ -80,28 +81,35 @@ fn client_gate(ctx: &Ctx) -> Option<Outcome> {
     }
 }
 
-fn unit_directive(ctx: &Ctx, key: &str) -> Option<String> {
-    let unit = ctx.inv()?.unit_path.as_ref()?;
-    let mut texts = Vec::new();
-    if let Ok(t) = ctx.fs.read(unit) {
-        texts.push(t);
-    }
-    for p in ctx.fs.list(format!("{unit}.d")) {
-        if p.extension().is_some_and(|e| e == "conf")
-            && let Ok(t) = std::fs::read_to_string(&p)
-        {
-            texts.push(t);
-        }
-    }
-    let mut found = None;
-    for text in texts {
-        for line in text.lines() {
-            if let Some(v) = line.trim().strip_prefix(&format!("{key}=")) {
-                found = Some(v.trim().trim_matches('"').to_string());
-            }
-        }
-    }
-    found.filter(|v| !v.is_empty())
+/// Linux capability bits we care about. CapPrm is a hex mask of these.
+const CAP_BITS: &[(&str, u32)] = &[
+    ("CAP_NET_ADMIN", 12),
+    ("CAP_NET_RAW", 13),
+    ("CAP_PERFMON", 38),
+    ("CAP_BPF", 39),
+];
+
+fn cap_missing(mask: u64, required: &[&str]) -> Vec<String> {
+    required
+        .iter()
+        .copied()
+        .filter(|name| {
+            CAP_BITS
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, b)| mask & (1u64 << b) == 0)
+                .unwrap_or(true)
+        })
+        .map(|s| s.to_string())
+        .collect()
+}
+
+fn cap_held(mask: u64) -> Vec<&'static str> {
+    CAP_BITS
+        .iter()
+        .filter(|(_, b)| mask & (1u64 << b) != 0)
+        .map(|(n, _)| *n)
+        .collect()
 }
 
 /// PF-XDP-0001. Invocation-aware, and that is the whole check. `--xdp-*` needs
@@ -152,9 +160,35 @@ pub fn capabilities(ctx: &Ctx) -> Outcome {
     let bounding = unit_directive(ctx, "CapabilityBoundingSet");
     let user = unit_directive(ctx, "User");
 
+    // A live process is correctness. The unit grant is persistence (PF-XDP-0007).
+    // Ambient in the unit with a process that was never restarted is a false PASS.
+    if let Some(mask) = runtime_capprm(ctx) {
+        let missing = cap_missing(mask, &state.required);
+        if missing.is_empty() {
+            return Outcome::pass(
+                format!("CapPrm holds {}", cap_held(mask).join(" ")),
+                expected,
+            )
+            .why(WHY_CAPS)
+            .verify("grep CapPrm /proc/$(pgrep -f agave-validator)/status");
+        }
+        return Outcome::fail(
+            format!(
+                "running validator CapPrm is {:016x}, missing {}",
+                mask,
+                missing.join(" ")
+            ),
+            expected,
+        )
+        .why(WHY_CAPS)
+        .fix(capability_fix(ctx, &state.required, bounding.as_deref()))
+        .verify("grep CapPrm /proc/$(pgrep -f agave-validator)/status")
+        .persists(Persistence::unit_dropin(ambient, &unit_or(inv)));
+    }
+
     if inv.unit_path.is_none() {
         return Outcome::unknown(
-            "invocation did not come from a systemd unit, so no capability directives to read",
+            "no running validator whose CapPrm could be read, and invocation did not come from a systemd unit",
         )
         .why(WHY_CAPS)
         .verify("grep CapPrm /proc/$(pgrep -f agave-validator)/status");
@@ -191,21 +225,31 @@ pub fn capabilities(ctx: &Ctx) -> Outcome {
         (_, Some(a), _) => format!("AmbientCapabilities={a}, missing {}", missing.join(" ")),
     };
 
-    // Never guess a unit name; see unit_or_placeholder in checks/arg.rs.
-    let unit = inv
-        .unit_name
-        .clone()
-        .unwrap_or_else(|| "<your-validator-unit>".into());
-    let caps = state.required.join(" ");
+    Outcome::fail(observed, expected)
+        .why(WHY_CAPS)
+        .fix(capability_fix(ctx, &state.required, bounding.as_deref()))
+        .verify("grep CapPrm /proc/$(pgrep -f agave-validator)/status")
+        .persists(Persistence::unit_dropin(ambient, &unit_or(inv)))
+}
 
-    // A drop-in CapabilityBoundingSet= replaces the unit's value rather than
-    // adding to it, so emitting one when the unit already permits what is
-    // needed would silently narrow the operator's bounding set. Write only the
-    // half that is actually missing.
-    // A drop-in replaces this directive, so only write it when it is missing.
-    let bounding_covers = bounding.as_deref().is_some_and(|b| {
+fn unit_or(inv: &crate::argv::Invocation) -> String {
+    inv.unit_name
+        .clone()
+        .unwrap_or_else(|| "<your-validator-unit>".into())
+}
+
+/// A drop-in CapabilityBoundingSet= replaces the unit's value rather than
+/// adding to it, so only write it when the unit does not already permit what
+/// is needed.
+fn capability_fix(ctx: &Ctx, required: &[&str], bounding: Option<&str>) -> Vec<FixStep> {
+    let unit = ctx
+        .inv()
+        .map(unit_or)
+        .unwrap_or_else(|| "<your-validator-unit>".into());
+    let caps = required.join(" ");
+    let bounding_covers = bounding.is_some_and(|b| {
         let have: Vec<String> = b.split_whitespace().map(|s| s.to_uppercase()).collect();
-        state.required.iter().all(|c| have.contains(&c.to_string()))
+        required.iter().all(|c| have.contains(&c.to_string()))
     });
     let (body, note) = match bounding_covers {
         true => (
@@ -219,20 +263,17 @@ pub fn capabilities(ctx: &Ctx) -> Outcome {
              blog post omits.",
         ),
     };
-
-    Outcome::fail(observed, expected)
-        .why(WHY_CAPS)
-        .fix(vec![
-            FixStep::cmd(format!("sudo mkdir -p /etc/systemd/system/{unit}.d")),
-            FixStep::noted(
-                format!("printf '[Service]\\n{body}\\n' | sudo tee /etc/systemd/system/{unit}.d/20-xdp-caps.conf"),
-                note,
+    vec![
+        FixStep::cmd(format!("sudo mkdir -p /etc/systemd/system/{unit}.d")),
+        FixStep::noted(
+            format!(
+                "printf '[Service]\\n{body}\\n' | sudo tee /etc/systemd/system/{unit}.d/20-xdp-caps.conf"
             ),
-            FixStep::cmd("sudo systemctl daemon-reload"),
-            FixStep::cmd(format!("sudo systemctl restart {unit}")),
-        ])
-        .verify("grep CapPrm /proc/$(pgrep -f agave-validator)/status")
-        .persists(Persistence::unit_dropin(ambient, &unit))
+            note,
+        ),
+        FixStep::cmd("sudo systemctl daemon-reload"),
+        FixStep::cmd(format!("sudo systemctl restart {unit}")),
+    ]
 }
 
 /// PF-XDP-0007. `Ephemeral` applied to capabilities. setcap writes to the

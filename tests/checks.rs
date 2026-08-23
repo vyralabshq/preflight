@@ -1121,7 +1121,7 @@ fn a_unit_that_only_mentions_a_validator_is_not_chosen() {
         files: &[
             (
                 "/etc/systemd/system/collector.service",
-                "[Unit]\nDescription=vyralabs validator metrics collector\n\n\
+                "[Unit]\nDescription=node metrics collector\n\n\
                  [Service]\nExecStart=/home/sol/collector/target/release/collector\n",
             ),
             (

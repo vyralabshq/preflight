@@ -32,12 +32,14 @@ pub const S_CAP_PERSIST: &[Source] = &[Source {
 const CAP_XDP: &[&str] = &["CAP_NET_ADMIN", "CAP_NET_RAW"];
 const CAP_ZERO_COPY: &[&str] = &["CAP_BPF", "CAP_PERFMON"];
 
-const WHY_CAPS: &str = "Since v4.0 agave exits(1) if a capability required by the current \
-    configuration is not in the process's permitted set. CapabilityBoundingSet caps what a \
-    process may ever hold; it grants nothing. On a unit with User= set to a non-root account the \
-    bounding set alone leaves the permitted set empty. Agave's changelog pairs the bounding set \
-    with AmbientCapabilities; the Anza XDP blog post shows only the bounding set, so unit files \
-    written from that post fail exactly this way.";
+const WHY_CAPS: &str = "CapabilityBoundingSet caps what a process may ever hold; it grants \
+    nothing. On a unit with User= set to a non-root account the bounding set alone leaves the \
+    permitted set empty. Agave's changelog pairs it with AmbientCapabilities, which is the \
+    directive that grants; the Anza XDP blog post shows only the bounding set, so unit files \
+    written from that post end up this way. Agave refuses to start over this only when the \
+    invocation asks for XDP explicitly. On the default path it starts, reports XDP as configured, \
+    and runs without it: attaching an XDP program needs CAP_NET_ADMIN and an AF_XDP socket needs \
+    CAP_NET_RAW, so with an empty permitted set the kernel allows neither and nothing says so.";
 
 struct XdpState {
     enabled: bool,
@@ -172,18 +174,32 @@ pub fn capabilities(ctx: &Ctx) -> Outcome {
             .why(WHY_CAPS)
             .verify("grep CapPrm /proc/$(pgrep -f agave-validator)/status");
         }
-        return Outcome::fail(
-            format!(
-                "running validator CapPrm is {:016x}, missing {}",
-                mask,
+        // The process is running, so this is never "it will not start". The
+        // bounding set matching the unit while ambient does not is the tell:
+        // the grant was added to the unit after this process was launched.
+        let stale = ambient.is_some();
+        let observed = match stale {
+            true => format!(
+                "the running validator holds no capabilities (CapPrm {mask:016x}), though its \
+                 unit grants {}. It has not been restarted since that was added",
+                state.required.join(" ")
+            ),
+            false => format!(
+                "the running validator holds no capabilities (CapPrm {mask:016x}), missing {}",
                 missing.join(" ")
             ),
-            expected,
-        )
-        .why(WHY_CAPS)
-        .fix(capability_fix(ctx, &state.required, bounding.as_deref()))
-        .verify("grep CapPrm /proc/$(pgrep -f agave-validator)/status")
-        .persists(Persistence::unit_dropin(ambient, &unit_or(inv)));
+        };
+        return Outcome::fail(observed, expected)
+            .why(WHY_CAPS)
+            .fix(match stale {
+                true => vec![FixStep::noted(
+                    format!("sudo systemctl restart {}", unit_or(inv)),
+                    "the unit is already correct; only the running process is not",
+                )],
+                false => capability_fix(ctx, &state.required, bounding.as_deref()),
+            })
+            .verify("ip link show | grep -i xdp")
+            .persists(Persistence::unit_dropin(ambient, &unit_or(inv)));
     }
 
     if inv.unit_path.is_none() {

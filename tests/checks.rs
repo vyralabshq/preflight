@@ -570,10 +570,12 @@ fn run_ends_with_what_to_do_first() {
         "agave-validator@4.2.1",
     ]);
     assert!(
-        o.contains("3 findings stop the validator from starting"),
+        o.contains("2 findings stop the validator from starting"),
         "{o}"
     );
-    assert!(o.contains("PF-ARG-0001, PF-ARG-0003, PF-XDP-0001"), "{o}");
+    // A missing capability is not one of them: agave only refuses to start over
+    // it when the invocation asks for XDP explicitly.
+    assert!(o.contains("PF-ARG-0001, PF-ARG-0003"), "{o}");
     assert!(flat(&o).contains("leave the node short"), "{o}");
 }
 
@@ -2315,4 +2317,58 @@ fn mapper_disks_are_listed_but_not_counted_twice() {
         "960 GB of hardware cannot report 1920:\n{block}"
     );
     assert!(flat(block).contains("960 GB"), "{block}");
+}
+
+/// A unit that grants ambient capabilities while the running process holds
+/// none means the grant was added after launch. Telling that operator to write
+/// the drop-in they already have is useless; the answer is a restart.
+#[test]
+fn a_grant_the_process_predates_asks_for_a_restart() {
+    let stale = Host {
+        name: "caps-added-after-launch",
+        files: &[
+            (
+                "/etc/systemd/system/sol.service",
+                "[Service]\nUser=sol\n\
+                 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW\n\
+                 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW\n\
+                 ExecStart=/home/sol/bin/validator.sh\n",
+            ),
+            (
+                "/home/sol/bin/validator.sh",
+                "#!/usr/bin/env bash\nexec agave-validator \\\n\
+                 --identity /home/sol/validator-keypair.json \\\n\
+                 --vote-account /home/sol/vote-account-keypair.json \\\n\
+                 --entrypoint entrypoint.testnet.solana.com:8001 \\\n\
+                 --ledger /mnt/ledger \\\n\
+                 --accounts /mnt/accounts \\\n\
+                 --dynamic-port-range 8000-8020\n",
+            ),
+            // A live process with an empty permitted set, as seen on a real box.
+            (
+                "/proc/4242/cmdline",
+                "agave-validator\0--ledger\0/mnt/ledger\0",
+            ),
+            (
+                "/proc/4242/status",
+                "Name:\tagave-validator\nUid:\t1001\t1001\t1001\t1001\n\
+                 CapPrm:\t0000000000000000\nCapBnd:\t0000000000003000\n\
+                 CapAmb:\t0000000000000000\n",
+            ),
+        ],
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let (o, _) = run(&[
+        "--root",
+        &host(&stale),
+        "--client",
+        "agave-validator@4.3.0",
+        "--profile",
+        "testnet",
+    ]);
+    let block = block_for(&o, "PF-XDP-0001");
+    assert!(
+        !flat(block).contains("stop the validator from starting"),
+        "it is running; that is how preflight read its CapPrm:\n{block}"
+    );
 }

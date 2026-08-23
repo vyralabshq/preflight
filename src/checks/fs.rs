@@ -202,9 +202,11 @@ pub fn capacity(ctx: &Ctx) -> Outcome {
             true => free / total,
             false => 1.0,
         };
+        // The floor is a device size, not a level. Comparing it against free
+        // space fails a 943 GB disk for holding a ledger, which is its job.
         match want(label) {
-            Some(need) if free < need => short.push(format!(
-                "{label} {path}: {free:.0} GB free, wants {need:.0} GB"
+            Some(need) if total > 0.0 && total < need => short.push(format!(
+                "{label} {path}: {total:.0} GB filesystem, wants {need:.0} GB"
             )),
             _ if ratio < t.min_free => short.push(format!(
                 "{label} {path}: {free:.0} GB free of {total:.0} GB, under {:.0}% headroom",
@@ -218,9 +220,15 @@ pub fn capacity(ctx: &Ctx) -> Outcome {
         true => WHY_SIZED,
         false => WHY_HEADROOM,
     };
-    let expected = match t.accounts_gb {
-        Some(_) => format!("about {NEED_TOTAL_GB:.0} GB across the validator's paths, per Anza"),
-        None => format!(
+    let expected = match (t.accounts_gb, t.disk_gb) {
+        (Some(_), _) => {
+            format!("about {NEED_TOTAL_GB:.0} GB across the validator's paths, per Anza")
+        }
+        (None, Some(d)) => format!(
+            "no published figure; a {d:.0} GB ledger filesystem and {:.0}% of each still free",
+            t.min_free * 100.0
+        ),
+        (None, None) => format!(
             "no published figure; preflight looks for {:.0}% free on each path",
             t.min_free * 100.0
         ),

@@ -2068,3 +2068,60 @@ fn an_idle_core_is_unknown_not_a_slow_cpu() {
     );
     assert!(flat(block).contains("3000 MHz base"), "{block}");
 }
+
+/// A 943 GB filesystem was failed for having 249 GB free against a 250 GB
+/// floor. The floor is a device size; free space is the separate headroom line.
+#[test]
+fn the_disk_floor_is_capacity_not_free_space() {
+    let full = Host {
+        name: "big-disk-mostly-used",
+        disks: &[("nvme0n1", 960, false), ("nvme1n1", 960, false)],
+        mounts: "/dev/nvme0n1p2 / ext4 rw,noatime 0 0\n\
+                 /dev/nvme1n1 /mnt/accounts xfs rw,noatime 0 0\n",
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let (o, _) = run(&[
+        "--root",
+        &host(&full),
+        "--client",
+        "agave-validator@4.3.0",
+        "--profile",
+        "testnet",
+        "-v",
+    ]);
+    let block = block_for(&o, "PF-FS-0001");
+    assert!(
+        !flat(block).contains("wants 250 GB"),
+        "a disk larger than the floor cannot be short of it:\n{block}"
+    );
+}
+
+/// A title as wide as its column used to run straight into the status word.
+#[test]
+fn no_title_touches_its_status() {
+    let (o, _) = run(&[
+        "--root",
+        &host(&WRAPPER_SCRIPT_UNIT),
+        "--client",
+        "agave-validator@4.3.0",
+        "-v",
+    ]);
+    const STATUSES: [&str; 6] = [
+        "PASS",
+        "FAIL",
+        "REPORTED",
+        "SKIPPED",
+        "UNKNOWN",
+        "EPHEMERAL",
+    ];
+    for line in o.lines().filter(|l| l.trim_start().starts_with("PF-")) {
+        let Some(word) = STATUSES.iter().find(|w| line.contains(**w)) else {
+            continue;
+        };
+        let before = &line[..line.find(*word).unwrap()];
+        assert!(
+            before.ends_with("  "),
+            "the status needs clear air after the title:\n{line}"
+        );
+    }
+}

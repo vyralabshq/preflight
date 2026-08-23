@@ -285,8 +285,10 @@ fn finding(f: &Finding, st: &Style, verbose: bool) -> String {
     }
     let mut s = String::new();
     let tag = if f.provisional { "  [provisional]" } else { "" };
-    let title = if f.title.len() > 52 {
-        format!("{}...", &f.title[..49])
+    // One shorter than the column, so a full-width title still gets a space
+    // before the status rather than running into it.
+    let title = if f.title.len() > 48 {
+        format!("{}...", &f.title[..45])
     } else {
         f.title.to_string()
     };
@@ -295,7 +297,7 @@ fn finding(f: &Finding, st: &Style, verbose: bool) -> String {
         _ => f.severity,
     };
     let head = format!(
-        "  {}  {:<48}{}  {}{}",
+        "  {}  {:<50}{}  {}{}",
         st.dim(f.id),
         title,
         st.paint(f.outcome.status, f.outcome.status.label()),

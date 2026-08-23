@@ -142,7 +142,7 @@ pub static CHECKS: &[Check] = &[
         id: "PF-KRN-0005",
         layer: Layer::Kernel,
         severity: Degraded,
-        title: "Kernel carries the XDP mode the invocation asks for",
+        title: "Kernel carries the XDP mode in use",
         profiles: &[Testnet, Mainnet],
         clients: AGAVE,
         needs_root: false,

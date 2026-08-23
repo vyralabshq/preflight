@@ -229,6 +229,9 @@ impl ClientKind {
 #[allow(dead_code)]
 pub enum SourceKind {
     AgaveSymbol,
+    /// Read out of the binary on this host, so it describes this build and no
+    /// other. Never used for a default value, only for what a flag expects.
+    LocalHelp,
     AgaveChangelog,
     AnzaDocs,
     AnzaBlog,

@@ -2227,6 +2227,10 @@ fn xdp_reads_capprm_when_a_process_exists() {
                 "/proc/42/status",
                 "Name:\tagave-validat\nUid:\t1001\t1001\t1001\t1001\nCapPrm:\t0000000000000000\n",
             ),
+            (
+                "/proc/42/task/42/status",
+                "Name:\tagave-validat\nCapPrm:\t0000000000000000\n",
+            ),
             ("/proc/42/cgroup", "0::/system.slice/sol.service\n"),
         ],
         ..WRAPPER_SCRIPT_UNIT
@@ -2239,12 +2243,13 @@ fn xdp_reads_capprm_when_a_process_exists() {
         "--profile",
         "testnet",
     ]);
+    // Agave drops what it does not need before spawning threads, so zero after
+    // startup is what a healthy node looks like and cannot be a finding.
     let block = block_for(&o, "PF-XDP-0001");
     assert!(
-        block.contains("FAIL"),
-        "empty CapPrm must not pass:\n{block}"
+        !block.contains("FAIL"),
+        "a dropped capability is not a missing one:\n{block}"
     );
-    assert!(flat(block).contains("CapPrm"), "{block}");
 
     let held = Host {
         name: "xdp-capprm-held",
@@ -2265,7 +2270,16 @@ fn xdp_reads_capprm_when_a_process_exists() {
             ),
             (
                 "/proc/42/status",
-                "Name:\tagave-validat\nUid:\t1001\t1001\t1001\t1001\nCapPrm:\t0000000000003000\n",
+                "Name:\tagave-validat\nUid:\t1001\t1001\t1001\t1001\nCapPrm:\t0000000000000000\n",
+            ),
+            // The main thread drops everything; one thread keeps cap_net_admin.
+            (
+                "/proc/42/task/42/status",
+                "Name:\tagave-validat\nCapPrm:\t0000000000000000\n",
+            ),
+            (
+                "/proc/42/task/57/status",
+                "Name:\tsolNetLnkRecv\nCapPrm:\t0000000000001000\n",
             ),
             ("/proc/42/cgroup", "0::/system.slice/sol.service\n"),
         ],
@@ -2283,7 +2297,11 @@ fn xdp_reads_capprm_when_a_process_exists() {
     let block = block_for(&o, "PF-XDP-0001");
     assert!(
         block.contains("PASS"),
-        "live CapPrm is correctness:\n{block}"
+        "a thread still holding cap_net_admin proves the grant arrived:\n{block}"
+    );
+    assert!(
+        flat(block).contains("reached the process"),
+        "runtime evidence confirms, it never refutes:\n{block}"
     );
     let persist = block_for(&o, "PF-XDP-0007");
     assert!(
@@ -2370,5 +2388,52 @@ fn a_grant_the_process_predates_asks_for_a_restart() {
     assert!(
         !flat(block).contains("stop the validator from starting"),
         "it is running; that is how preflight read its CapPrm:\n{block}"
+    );
+}
+
+/// A required value swallowed by the next flag is invisible once the process
+/// is up: the running command line still shows both flags.
+#[test]
+fn a_flag_that_lost_its_value_is_a_finding() {
+    let lost = Host {
+        name: "flag-without-value",
+        files: &[
+            (
+                "/etc/systemd/system/sol.service",
+                "[Service]\nUser=sol\nExecStart=/home/sol/bin/validator.sh\n",
+            ),
+            (
+                "/home/sol/bin/validator.sh",
+                "#!/usr/bin/env bash\nexec agave-validator \\\n\
+                 --identity /home/sol/validator-keypair.json \\\n\
+                 --vote-account /home/sol/vote-account-keypair.json \\\n\
+                 --entrypoint entrypoint.testnet.solana.com:8001 \\\n\
+                 --ledger /mnt/ledger \\\n\
+                 --accounts /mnt/accounts \\\n\
+                 --limit-blockstore-size \\\n\
+                 --accounts-db-write-cache-limit 10GB\n",
+            ),
+        ],
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let (o, _) = run(&[
+        "--root",
+        &host(&lost),
+        "--client",
+        "agave-validator@4.3.0",
+        "--profile",
+        "testnet",
+        "-v",
+    ]);
+    let block = block_for(&o, "PF-ARG-0014");
+    assert!(block.contains("FAIL"), "{block}");
+    assert!(
+        flat(block).contains("--limit-blockstore-size"),
+        "name the flag that lost it:\n{block}"
+    );
+    // The flag it swallowed still parses as present, which is the trap.
+    assert!(
+        block_for(&o, "PF-ARG-0011").contains("PASS"),
+        "0011 sees the flag and cannot see the missing value; 0014 is why it exists"
     );
 }

@@ -381,6 +381,17 @@ pub static CHECKS: &[Check] = &[
         run: arg::tpu_connection_pool_size,
     },
     Check {
+        id: "PF-ARG-0014",
+        layer: Layer::Arg,
+        severity: Degraded,
+        title: "Every flag that takes a value has one",
+        profiles: &[Local, Testnet, Mainnet],
+        clients: AGAVE,
+        needs_root: false,
+        source: arg::S_NEEDS_VALUE,
+        run: arg::flags_have_values,
+    },
+    Check {
         id: "PF-XDP-0001",
         layer: Layer::Xdp,
         severity: Degraded,

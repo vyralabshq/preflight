@@ -12,6 +12,79 @@ use crate::{
 
 pub const PORT_RANGE_MIN_WIDTH: u16 = 26;
 
+/// Flags whose help text shows a required value placeholder. A flag from this
+/// list with the next token being another flag means the shell line lost a
+/// value, and clap either swallows the following flag or refuses to start.
+pub const S_NEEDS_VALUE: &[Source] = &[Source {
+    kind: LocalHelp,
+    locator: "value placeholders in agave-validator --help",
+    verified_against: "4.3.0-beta.0",
+    provisional: false,
+}];
+
+const NEEDS_VALUE: &[&str] = &[
+    "--identity",
+    "--vote-account",
+    "--ledger",
+    "--accounts",
+    "--snapshots",
+    "--entrypoint",
+    "--known-validator",
+    "--expected-shred-version",
+    "--dynamic-port-range",
+    "--limit-ledger-size",
+    "--limit-blockstore-size",
+    "--accounts-db-write-cache-limit",
+    "--accounts-index-limit",
+    "--block-production-method",
+    "--block-verification-method",
+    "--wal-recovery-mode",
+    "--log",
+    "--rpc-port",
+    "--full-rpc-api",
+    "--gossip-port",
+    "--gossip-host",
+    "--xdp-interface",
+    "--xdp-cpu-cores",
+];
+
+/// PF-ARG-0014. A flag that needs a value, given none.
+pub fn flags_have_values(ctx: &Ctx) -> Outcome {
+    const WHY: &str = "agave-validator takes these flags with a value, and preflight reads the \
+        command line as text, the same way clap receives it. When the token after such a flag is \
+        another flag, the value is gone: clap either consumes the following flag as the value, so \
+        that flag never applies and the number in effect is nonsense, or it refuses the line and \
+        the node does not start. Neither is visible once the process is up, because the running \
+        command line still looks like it has both flags.";
+    const EXPECTED: &str = "a value after every flag that takes one";
+
+    let inv = match require_invocation(ctx) {
+        Ok(i) => i,
+        Err(o) => return *o,
+    };
+    let empty: Vec<String> = NEEDS_VALUE
+        .iter()
+        .filter(|f| inv.has(f) && inv.value(f).is_none())
+        .map(|f| f.to_string())
+        .collect();
+    if empty.is_empty() {
+        return Outcome::pass("every flag that takes a value has one", EXPECTED).why(WHY);
+    }
+    let steps: Vec<FixStep> = empty
+        .iter()
+        .map(|f| {
+            FixStep::noted(
+                format!("give {f} a value, or drop the flag and take the default"),
+                "check the placeholder in agave-validator --help for the unit it expects",
+            )
+        })
+        .collect();
+    Outcome::fail(format!("no value after {}", empty.join(", ")), EXPECTED)
+        .why(WHY)
+        .fix(edit_steps(ctx, steps))
+        .verify("agave-validator --help | grep -A2 -- '<FLAG>'")
+}
+
 pub const S_PORTS: &[Source] = &[
     Source {
         kind: AgaveSymbol,

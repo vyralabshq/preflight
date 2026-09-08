@@ -10,6 +10,22 @@ use crate::{
     model::{FixStep, Outcome, Source, SourceKind::*},
 };
 
+/// Vendor guides, not Anza. Anza publishes nothing on interrupt affinity.
+pub const S_IRQ: &[Source] = &[
+    Source {
+        kind: Operator,
+        locator: "AMD EPYC Linux Network Tuning Guide, IRQ affinity",
+        verified_against: "2026-09",
+        provisional: false,
+    },
+    Source {
+        kind: Operator,
+        locator: "Intel Ethernet 800 Series perf tuning, IRQ affinity",
+        verified_against: "2026-09",
+        provisional: false,
+    },
+];
+
 pub const S_HCL: &[Source] = &[Source {
     kind: Operator,
     locator: "solanahcl.org, network card list",
@@ -183,4 +199,132 @@ pub fn xdp_driver_support(ctx: &Ctx) -> Outcome {
         .why(why),
         _ => Outcome::pass(observed, EXPECTED).why(why),
     }
+}
+
+/// This card's queue interrupts, as (name, cpu). Matched by name because irq
+/// numbers move across reboots.
+fn queue_irqs(ctx: &Ctx, iface: &str) -> Vec<(String, u32)> {
+    let Ok(text) = ctx.fs.read("/proc/interrupts") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let Some((num, rest)) = line.split_once(':') else {
+            continue;
+        };
+        let irq = num.trim();
+        if irq.is_empty() || !irq.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let label = rest.split_whitespace().last().unwrap_or_default();
+        // mlx5 writes iface-0, intel iface-TxRx-0. Common part is the
+        // interface name then a queue index.
+        if !label.starts_with(iface) || !label.ends_with(|c: char| c.is_ascii_digit()) {
+            continue;
+        }
+        let Some(cpu) = ctx
+            .fs
+            .read(format!("/proc/irq/{irq}/smp_affinity_list"))
+            .ok()
+            .and_then(|v| v.trim().split(&[',', '-'][..]).next()?.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        out.push((label.to_string(), cpu));
+    }
+    out
+}
+
+/// A CPU's physical core, as its sibling list. Two SMT threads share it.
+fn physical_core(ctx: &Ctx, cpu: u32) -> String {
+    ctx.fs
+        .read(format!(
+            "/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list"
+        ))
+        .map(|v| v.trim().to_string())
+        .unwrap_or_else(|_| cpu.to_string())
+}
+
+/// PF-NET-0002. Queue interrupts stacked on one core while others sit idle.
+pub fn irq_affinity(ctx: &Ctx) -> Outcome {
+    const WHY: &str = "The card sorts incoming packets into hardware queues, each drained by the \
+        CPU it interrupts. If a queue fills faster than its CPU empties it, the card discards \
+        packets, and what is discarded is shreds, votes and gossip the validator never sees. Two \
+        queues landing on the two SMT threads of one physical core give those queues one core's \
+        worth of capacity between them while other cores carry none. Anza publishes nothing here; \
+        the vendor guides do, and they disagree with Red Hat about whether to disable irqbalance, \
+        so preflight reports the layout and fails only on the stacking itself.";
+    const EXPECTED: &str = "each queue interrupt on a core of its own";
+
+    if let Some(o) = needs_linux(ctx, WHY) {
+        return o;
+    }
+    let Some(iface) = primary_interface(ctx) else {
+        return Outcome::skipped("no primary interface to read queue interrupts for");
+    };
+    let irqs = queue_irqs(ctx, &iface);
+    if irqs.is_empty() {
+        return Outcome::skipped(format!("{iface} raises no per-queue interrupts to place"));
+    }
+
+    let mut by_core: std::collections::BTreeMap<String, Vec<u32>> = Default::default();
+    for (_, cpu) in &irqs {
+        by_core
+            .entry(physical_core(ctx, *cpu))
+            .or_default()
+            .push(*cpu);
+    }
+    let stacked: Vec<(&String, &Vec<u32>)> = by_core.iter().filter(|(_, v)| v.len() > 1).collect();
+    let layout = {
+        let mut cpus: Vec<String> = irqs.iter().map(|(_, c)| c.to_string()).collect();
+        cpus.sort_by_key(|c| c.parse::<u32>().unwrap_or(0));
+        format!("{} queues on CPUs {}", irqs.len(), cpus.join(" "))
+    };
+
+    // A good layout today is not a layout tomorrow. Enabled state is a
+    // wants/ symlink, so no exec needed.
+    let balancer = ctx
+        .fs
+        .exists("/etc/systemd/system/multi-user.target.wants/irqbalance.service");
+    let drift = match balancer {
+        true => " irqbalance is enabled, so whatever is set here it will move again on its own.",
+        false => "",
+    };
+
+    if stacked.is_empty() {
+        return Outcome::pass(format!("{layout}, one physical core each"), EXPECTED)
+            .why(format!("{WHY}{drift}"));
+    }
+    let named: Vec<String> = stacked
+        .iter()
+        .map(|(core, cpus)| {
+            let l: Vec<String> = cpus.iter().map(|c| c.to_string()).collect();
+            format!("CPUs {} are one core ({core})", l.join(" and "))
+        })
+        .collect();
+    Outcome::fail(format!("{layout}; {}", named.join("; ")), EXPECTED)
+        .why(format!("{WHY}{drift}"))
+        .fix(vec![
+            FixStep::noted(
+                "cat /sys/devices/system/cpu/cpu*/cache/index3/shared_cpu_list | sort -u",
+                "read the real cache topology first, then spread the queues evenly across it \
+                 rather than onto the first N cores",
+            ),
+            FixStep::noted(
+                format!(
+                    "echo <cpu> | sudo tee /proc/irq/<irq>/smp_affinity_list   for each {iface} queue"
+                ),
+                "one queue per physical core. Look the interrupts up by name, since irq numbers \
+                 change across reboots",
+            ),
+            FixStep::noted(
+                "then decide about irqbalance",
+                "the vendor guides say disable it because it overrides manual affinity; Red Hat \
+                 says not to unless every interrupt source is pinned by hand, or they all land on \
+                 CPU 0. Pin them all, or leave it running and accept the drift",
+            ),
+        ])
+        .verify(format!(
+            "grep '{iface}-' /proc/interrupts | cut -d: -f1 | xargs -I{{}} cat /proc/irq/{{}}/smp_affinity_list"
+        ))
 }

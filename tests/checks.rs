@@ -2420,3 +2420,126 @@ fn a_flag_that_lost_its_value_is_a_finding() {
         "0011 sees the flag and cannot see the missing value; 0014 is why it exists"
     );
 }
+
+/// The governor that cost a live testnet validator 16 slots in one epoch. Anza
+/// publishes the fix and nothing else in the registry looks at it: every other
+/// clock check reads the rated base, which stays 3000 while the core runs 1500.
+#[test]
+fn a_power_saving_governor_is_a_finding() {
+    const CPUS: usize = 32;
+    let mut files: Vec<(String, String)> = Vec::new();
+    for c in 0..CPUS {
+        files.push((
+            format!("/sys/devices/system/cpu/cpu{c}/cpufreq/scaling_governor"),
+            "ondemand\n".into(),
+        ));
+    }
+    files.push((
+        "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq".into(),
+        "3717000\n".into(),
+    ));
+    let leaked: &'static [(&'static str, &'static str)] = Box::leak(
+        files
+            .into_iter()
+            .map(|(a, b)| {
+                (
+                    &*Box::leak(a.into_boxed_str()) as &'static str,
+                    &*Box::leak(b.into_boxed_str()) as &'static str,
+                )
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+    );
+    let underclocked = Host {
+        name: "ondemand-governor",
+        files: leaked,
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let (o, _) = run(&[
+        "--root",
+        &host(&underclocked),
+        "--client",
+        "agave-validator@4.3.0",
+        "--profile",
+        "testnet",
+    ]);
+    let block = block_for(&o, "PF-HW-0008");
+    assert!(block.contains("FAIL"), "{block}");
+    assert!(flat(block).contains("32 of 32 CPUs on ondemand"), "{block}");
+    assert!(
+        flat(block).contains("scaling_governor"),
+        "the fix is Anza's own command:\n{block}"
+    );
+    // Anza's second command, with the number read off this box rather than
+    // left as a placeholder.
+    assert!(
+        flat(block).contains("3717000"),
+        "name the frequency to write:\n{block}"
+    );
+    assert!(
+        flat(block).contains("docs.anza.xyz/operations/setup-a-validator"),
+        "this one is published, not operator practice:\n{block}"
+    );
+}
+
+/// Two queues on the two SMT threads of one core, which is what irqbalance had
+/// done and what accounted for most of the historical discards.
+#[test]
+fn queues_stacked_on_one_core_are_a_finding() {
+    let stacked = Host {
+        name: "stacked-irqs",
+        nic: Some(("ens3f0np0", "mlx5_core")),
+        files: &[
+            (
+                "/proc/interrupts",
+                "  24:  1 2  IR-PCI-MSI 100-edge  ens3f0np0-TxRx-0\n\
+                 \x20 25:  1 2  IR-PCI-MSI 101-edge  ens3f0np0-TxRx-1\n\
+                 \x20 26:  1 2  IR-PCI-MSI 102-edge  ens3f0np0-TxRx-2\n",
+            ),
+            ("/proc/irq/24/smp_affinity_list", "2\n"),
+            ("/proc/irq/25/smp_affinity_list", "18\n"),
+            ("/proc/irq/26/smp_affinity_list", "5\n"),
+            (
+                "/sys/devices/system/cpu/cpu2/topology/thread_siblings_list",
+                "2,18\n",
+            ),
+            (
+                "/sys/devices/system/cpu/cpu18/topology/thread_siblings_list",
+                "2,18\n",
+            ),
+            (
+                "/sys/devices/system/cpu/cpu5/topology/thread_siblings_list",
+                "5,21\n",
+            ),
+            (
+                "/etc/systemd/system/multi-user.target.wants/irqbalance.service",
+                "\n",
+            ),
+        ],
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let (o, _) = run(&[
+        "--root",
+        &host(&stacked),
+        "--client",
+        "agave-validator@4.3.0",
+        "--profile",
+        "testnet",
+    ]);
+    let block = block_for(&o, "PF-NET-0002");
+    assert!(block.contains("FAIL"), "{block}");
+    assert!(
+        flat(block).contains("CPUs 2 and 18 are one core"),
+        "name the pair, not just the count:\n{block}"
+    );
+    assert!(
+        flat(block).contains("irqbalance is enabled"),
+        "a layout that drifts has to say so:\n{block}"
+    );
+    // Red Hat disagrees with the vendor guides, and the fix must not pretend
+    // otherwise by simply telling an operator to disable the daemon.
+    assert!(
+        flat(block).contains("Red Hat"),
+        "the disagreement is real and belongs in the fix:\n{block}"
+    );
+}

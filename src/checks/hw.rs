@@ -306,6 +306,14 @@ const UBUNTU_EOL: &[(&str, u32, u32)] = &[
     ("24.04", 2029, 6),
 ];
 
+/// Anza's setup guide, the CPU tuning block under the 2.8 GHz requirement.
+pub const S_CPUFREQ: &[Source] = &[Source {
+    kind: AnzaDocs,
+    locator: "docs.anza.xyz/operations/setup-a-validator, Set performance governor",
+    verified_against: "2026-09",
+    provisional: false,
+}];
+
 pub const S_RELEASE: &[Source] = &[Source {
     kind: Operator,
     locator: "ubuntu.com/about/release-cycle",
@@ -374,4 +382,97 @@ pub fn os_support(ctx: &Ctx) -> Outcome {
             "extended maintenance may still deliver security fixes, but not new kernels",
         )]),
     }
+}
+
+/// Every CPU's governor. Reading one is not enough: the slow core is the one
+/// that bites.
+fn governors(ctx: &Ctx) -> Vec<String> {
+    let mut v: Vec<String> = ctx
+        .fs
+        .list("/sys/devices/system/cpu")
+        .into_iter()
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("cpu") && n[3..].chars().all(|c| c.is_ascii_digit()))
+        })
+        .filter_map(|p| std::fs::read_to_string(p.join("cpufreq/scaling_governor")).ok())
+        .map(|g| g.trim().to_string())
+        .filter(|g| !g.is_empty())
+        .collect();
+    v.sort();
+    v
+}
+
+/// PF-HW-0008. The governor Anza tells you to set, which nothing else reports.
+pub fn cpu_governor(ctx: &Ctx) -> Outcome {
+    const WHY: &str = "Anza's setup guide says to set the performance governor, and warns in as \
+        many words that CPU scaling can leave your clock underclocked. A power saving governor \
+        such as ondemand or powersave keeps cores low and raises them only after it notices load \
+        arriving. The average under sustained load looks fine, which is why nothing appears \
+        broken. The damage is in the tail: a burst hitting idle cores makes them climb first, and \
+        Solana produces a block every 197 ms whether or not yours is ready. Replay that \
+        occasionally exceeds a slot cannot be recovered from, because the next block has already \
+        arrived.";
+    const EXPECTED: &str = "performance on every CPU";
+
+    if let Some(o) = needs_linux(ctx, WHY) {
+        return o;
+    }
+    let found = governors(ctx);
+    if found.is_empty() {
+        return match ctx.fs.is_prefixed() {
+            true => Outcome::skipped("no cpufreq data in this capture"),
+            // A VM or a host without cpufreq has no governor to set, which is
+            // not the same as having the wrong one.
+            false => Outcome::skipped("this host exposes no cpufreq governor"),
+        };
+    }
+    let total = found.len();
+    let slow: Vec<&String> = found
+        .iter()
+        .filter(|g| g.as_str() != "performance")
+        .collect();
+    if slow.is_empty() {
+        return Outcome::pass(format!("performance on all {total} CPUs"), EXPECTED).why(WHY);
+    }
+    let mut names: Vec<&str> = slow.iter().map(|g| g.as_str()).collect();
+    names.sort();
+    names.dedup();
+    Outcome::fail(
+        format!("{} of {total} CPUs on {}", slow.len(), names.join(", ")),
+        EXPECTED,
+    )
+    .why(WHY)
+    .fix(fix_steps(ctx))
+    .verify("cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor | sort | uniq -c")
+}
+
+/// Anza's two commands. Both are sysfs writes, so neither survives a reboot.
+fn fix_steps(ctx: &Ctx) -> Vec<FixStep> {
+    let mut v = vec![FixStep::noted(
+        "echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor",
+        "takes effect immediately, and does not restart or interrupt the validator",
+    )];
+    // Only printed when preflight can name the number to write.
+    if let Some(khz) = ctx
+        .fs
+        .read("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+    {
+        v.push(FixStep::noted(
+            format!("echo {khz} | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_min_freq"),
+            format!(
+                "Anza's second step, forcing the floor to the {:.0} MHz ceiling so no core idles \
+                 below its base clock",
+                khz as f64 / 1000.0
+            ),
+        ));
+    }
+    v.push(FixStep::noted(
+        "then run both from a systemd oneshot unit so they survive a reboot",
+        "a sysfs write does not persist, and cpufrequtils is legacy",
+    ));
+    v
 }

@@ -11,6 +11,24 @@ use crate::{
 };
 
 /// Vendor guides, not Anza. Anza publishes nothing on interrupt affinity.
+/// Nobody publishes this one. It falls out of two things that are published:
+/// PoH is a sequential chain bound by single core speed, and a queue's
+/// interrupts land on the CPU it is pinned to.
+pub const S_POH_IRQ: &[Source] = &[
+    Source {
+        kind: Operator,
+        locator: "PoH core against the queue interrupt map, preflight's own",
+        verified_against: "2026-09",
+        provisional: false,
+    },
+    Source {
+        kind: AnzaDocs,
+        locator: "docs.anza.xyz/operations/requirements, higher clock over more cores",
+        verified_against: "2026-09",
+        provisional: false,
+    },
+];
+
 pub const S_IRQ: &[Source] = &[
     Source {
         kind: Operator,
@@ -324,6 +342,98 @@ pub fn irq_affinity(ctx: &Ctx) -> Outcome {
                  CPU 0. Pin them all, or leave it running and accept the drift",
             ),
         ])
+        .verify(format!(
+            "grep '{iface}-' /proc/interrupts | cut -d: -f1 | xargs -I{{}} cat /proc/irq/{{}}/smp_affinity_list"
+        ))
+}
+
+/// The CPU cores the invocation pins work to, by flag.
+fn pinned_cores(inv: &crate::argv::Invocation) -> Vec<(&'static str, u32)> {
+    let mut v = Vec::new();
+    for flag in [
+        "--poh-pinned-cpu-core",
+        "--experimental-poh-pinned-cpu-core",
+    ] {
+        if let Some(c) = inv.value(flag).and_then(|x| x.trim().parse().ok()) {
+            v.push((flag, c));
+        }
+    }
+    for flag in ["--xdp-cpu-cores", "--experimental-retransmit-xdp-cpu-cores"] {
+        let Some(raw) = inv.value(flag) else { continue };
+        for part in raw.split(',') {
+            if let Ok(c) = part.trim().parse() {
+                v.push((flag, c));
+            }
+        }
+    }
+    v
+}
+
+/// PF-NET-0003. A pinned core that also drains a NIC queue.
+pub fn pinned_core_collides_with_irq(ctx: &Ctx) -> Outcome {
+    const WHY: &str = "Pinning a thread to a core is a promise that the core is its own. A queue \
+        interrupt on that same core breaks the promise: every packet the card delivers preempts \
+        whatever is pinned there. Proof of History is the worst thing to do that to, because it \
+        is a sequential hash chain and Anza's own guidance is that clock speed matters more than \
+        cores for exactly this reason. Nothing reports the collision. The flag says the core is \
+        reserved, the interrupt table says otherwise, and no tool reads both.";
+    const EXPECTED: &str = "no pinned core also draining a queue interrupt";
+
+    if let Some(o) = needs_linux(ctx, WHY) {
+        return o;
+    }
+    let Some(inv) = ctx.inv() else {
+        return Outcome::skipped("no validator yet, so nothing is pinned");
+    };
+    let pinned = pinned_cores(inv);
+    if pinned.is_empty() {
+        return Outcome::skipped("the invocation pins no cores");
+    }
+    let Some(iface) = primary_interface(ctx) else {
+        return Outcome::skipped("no primary interface to read queue interrupts for");
+    };
+    let irqs = queue_irqs(ctx, &iface);
+    if irqs.is_empty() {
+        return Outcome::skipped(format!(
+            "{iface} raises no per-queue interrupts to collide with"
+        ));
+    }
+
+    // A collision is on the physical core, not the thread: an interrupt on the
+    // sibling of a pinned core is still stealing that core's cycles.
+    let irq_cores: std::collections::BTreeMap<String, u32> = irqs
+        .iter()
+        .map(|(_, cpu)| (physical_core(ctx, *cpu), *cpu))
+        .collect();
+    let hits: Vec<String> = pinned
+        .iter()
+        .filter_map(|(flag, core)| {
+            let sibs = physical_core(ctx, *core);
+            irq_cores.get(&sibs).map(|irq_cpu| match irq_cpu == core {
+                true => format!("{flag} {core} also drains a queue on {iface}"),
+                false => format!(
+                    "{flag} {core} shares a physical core with CPU {irq_cpu}, which drains a \
+                     queue on {iface}"
+                ),
+            })
+        })
+        .collect();
+
+    let listed: Vec<String> = pinned.iter().map(|(f, c)| format!("{f} {c}")).collect();
+    if hits.is_empty() {
+        return Outcome::pass(
+            format!("{} clear of every queue interrupt", listed.join(", ")),
+            EXPECTED,
+        )
+        .why(WHY);
+    }
+    Outcome::fail(hits.join("; "), EXPECTED)
+        .why(WHY)
+        .fix(vec![FixStep::noted(
+            format!("move the queue off that core, or pin to one no {iface} queue uses"),
+            "moving the interrupt takes effect immediately and needs no validator restart. \
+             Changing the flag needs one, so prefer moving the interrupt",
+        )])
         .verify(format!(
             "grep '{iface}-' /proc/interrupts | cut -d: -f1 | xargs -I{{}} cat /proc/irq/{{}}/smp_affinity_list"
         ))

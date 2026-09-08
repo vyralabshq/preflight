@@ -2661,3 +2661,68 @@ fn a_sibling_thread_draining_a_queue_counts_as_a_collision() {
         "a sibling is the same core:\n{block}"
     );
 }
+
+/// Nobody passes the flag, so agave falls back to DEFAULT_PINNED_CPU_CORE,
+/// which is 0 on Linux. Core 0 is also where interrupts land by default. The
+/// check used to skip this case, which is the one most likely to be wrong.
+#[test]
+fn the_default_poh_core_is_checked_without_a_flag() {
+    let default_core = Host {
+        name: "poh-default-core-0",
+        nic: Some(("ens3f0np0", "mlx5_core")),
+        files: &[
+            (
+                "/etc/systemd/system/sol.service",
+                "[Service]\nUser=sol\nExecStart=/home/sol/bin/validator.sh\n",
+            ),
+            // No --poh-pinned-cpu-core anywhere in here.
+            (
+                "/home/sol/bin/validator.sh",
+                "#!/usr/bin/env bash\nexec agave-validator \\\n\
+                 --identity /home/sol/validator-keypair.json \\\n\
+                 --vote-account /home/sol/vote-account-keypair.json \\\n\
+                 --entrypoint entrypoint.testnet.solana.com:8001 \\\n\
+                 --ledger /mnt/ledger \\\n\
+                 --accounts /mnt/accounts \\\n\
+                 --dynamic-port-range 8000-8030\n",
+            ),
+            (
+                "/proc/interrupts",
+                "  24:  1 2  IR-PCI-MSI 100-edge  ens3f0np0-TxRx-0\n\
+                 \x20 25:  1 2  IR-PCI-MSI 101-edge  ens3f0np0-TxRx-1\n",
+            ),
+            ("/proc/irq/24/smp_affinity_list", "0\n"),
+            ("/proc/irq/25/smp_affinity_list", "3\n"),
+            (
+                "/sys/devices/system/cpu/cpu0/topology/thread_siblings_list",
+                "0,16\n",
+            ),
+            (
+                "/sys/devices/system/cpu/cpu3/topology/thread_siblings_list",
+                "3,19\n",
+            ),
+        ],
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let (o, _) = run(&[
+        "--root",
+        &host(&default_core),
+        "--client",
+        "agave-validator@4.3.0",
+        "--profile",
+        "testnet",
+    ]);
+    let block = block_for(&o, "PF-NET-0003");
+    assert!(
+        block.contains("FAIL"),
+        "no flag does not mean no pinned core:\n{block}"
+    );
+    assert!(
+        flat(block).contains("PoH's default core 0 also drains a queue"),
+        "say it is the default, not a flag they set:\n{block}"
+    );
+    assert!(
+        flat(block).contains("DEFAULT_PINNED_CPU_CORE"),
+        "the default comes from a symbol, so cite it:\n{block}"
+    );
+}

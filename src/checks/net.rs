@@ -16,6 +16,12 @@ use crate::{
 /// interrupts land on the CPU it is pinned to.
 pub const S_POH_IRQ: &[Source] = &[
     Source {
+        kind: AgaveSymbol,
+        locator: "DEFAULT_PINNED_CPU_CORE in poh_service.rs, Some(0) on Linux",
+        verified_against: "agave master",
+        provisional: false,
+    },
+    Source {
         kind: Operator,
         locator: "PoH core against the queue interrupt map, preflight's own",
         verified_against: "2026-09",
@@ -347,22 +353,31 @@ pub fn irq_affinity(ctx: &Ctx) -> Outcome {
         ))
 }
 
-/// The CPU cores the invocation pins work to, by flag.
-fn pinned_cores(inv: &crate::argv::Invocation) -> Vec<(&'static str, u32)> {
+/// The cores this validator pins work to. PoH is always one of them on Linux:
+/// with no flag agave falls back to DEFAULT_PINNED_CPU_CORE, which is 0.
+fn pinned_cores(ctx: &Ctx, inv: &crate::argv::Invocation) -> Vec<(String, u32)> {
     let mut v = Vec::new();
-    for flag in [
+    let poh = [
         "--poh-pinned-cpu-core",
         "--experimental-poh-pinned-cpu-core",
-    ] {
-        if let Some(c) = inv.value(flag).and_then(|x| x.trim().parse().ok()) {
-            v.push((flag, c));
-        }
+    ]
+    .iter()
+    .find_map(|f| {
+        inv.value(f)
+            .and_then(|x| x.trim().parse().ok().map(|c| (*f, c)))
+    });
+    match poh {
+        Some((flag, core)) => v.push((format!("{flag} {core}"), core)),
+        // Skipping here would skip the configuration most likely to have the
+        // problem: nobody sets the flag, and core 0 is where interrupts land.
+        None if ctx.is_linux() => v.push(("PoH's default core 0".to_string(), 0)),
+        None => {}
     }
     for flag in ["--xdp-cpu-cores", "--experimental-retransmit-xdp-cpu-cores"] {
         let Some(raw) = inv.value(flag) else { continue };
         for part in raw.split(',') {
-            if let Ok(c) = part.trim().parse() {
-                v.push((flag, c));
+            if let Ok(c) = part.trim().parse::<u32>() {
+                v.push((format!("{flag} {c}"), c));
             }
         }
     }
@@ -373,10 +388,13 @@ fn pinned_cores(inv: &crate::argv::Invocation) -> Vec<(&'static str, u32)> {
 pub fn pinned_core_collides_with_irq(ctx: &Ctx) -> Outcome {
     const WHY: &str = "Pinning a thread to a core is a promise that the core is its own. A queue \
         interrupt on that same core breaks the promise: every packet the card delivers preempts \
-        whatever is pinned there. Proof of History is the worst thing to do that to, because it \
-        is a sequential hash chain and Anza's own guidance is that clock speed matters more than \
-        cores for exactly this reason. Nothing reports the collision. The flag says the core is \
-        reserved, the interrupt table says otherwise, and no tool reads both.";
+        whatever is pinned there. PoH is the worst thing to do that to. It is a tight sequential \
+        hash loop, agave calls set_cpu_affinity on it so its working set stays in one core's \
+        cache, and it panics rather than start if that call fails. On Linux this happens whether \
+        or not you pass a flag: with none, agave uses DEFAULT_PINNED_CPU_CORE, which is 0. That \
+        matters because core 0 is where interrupts land by default, which is Red Hat's own stated \
+        reason for leaving irqbalance running. Nothing reports the overlap: no tool reads the \
+        command line and the interrupt table at once.";
     const EXPECTED: &str = "no pinned core also draining a queue interrupt";
 
     if let Some(o) = needs_linux(ctx, WHY) {
@@ -385,9 +403,9 @@ pub fn pinned_core_collides_with_irq(ctx: &Ctx) -> Outcome {
     let Some(inv) = ctx.inv() else {
         return Outcome::skipped("no validator yet, so nothing is pinned");
     };
-    let pinned = pinned_cores(inv);
+    let pinned = pinned_cores(ctx, inv);
     if pinned.is_empty() {
-        return Outcome::skipped("the invocation pins no cores");
+        return Outcome::skipped("nothing is pinned on this host");
     }
     let Some(iface) = primary_interface(ctx) else {
         return Outcome::skipped("no primary interface to read queue interrupts for");
@@ -407,13 +425,13 @@ pub fn pinned_core_collides_with_irq(ctx: &Ctx) -> Outcome {
         .collect();
     let hits: Vec<String> = pinned
         .iter()
-        .filter_map(|(flag, core)| {
+        .filter_map(|(label, core)| {
             let sibs = physical_core(ctx, *core);
             irq_cores.get(&sibs).map(|irq_cpu| match irq_cpu == core {
-                true => format!("{flag} {core} also drains a queue on {iface}"),
+                true => format!("{label} also drains a queue on {iface}"),
                 false => format!(
-                    "{flag} {core} shares a physical core with CPU {irq_cpu}, which drains a \
-                     queue on {iface}"
+                    "{label} shares a physical core with CPU {irq_cpu}, which drains a queue on \
+                     {iface}"
                 ),
             })
         })
@@ -430,7 +448,8 @@ pub fn pinned_core_collides_with_irq(ctx: &Ctx) -> Outcome {
     Outcome::fail(hits.join("; "), EXPECTED)
         .why(WHY)
         .fix(vec![FixStep::noted(
-            format!("move the queue off that core, or pin to one no {iface} queue uses"),
+            format!("move that queue to a core no pinned thread uses, or pass \
+                    --poh-pinned-cpu-core with one the {iface} queues avoid"),
             "moving the interrupt takes effect immediately and needs no validator restart. \
              Changing the flag needs one, so prefer moving the interrupt",
         )])

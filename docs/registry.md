@@ -37,6 +37,8 @@
 | `PF-ARG-0012` | ARG | advisory | testnet mainnet | agave-validator | Banking trace flag still expresses something *(provisional)* | 4.3.0-Unreleased Validator/Deprecations | master 2026-08 |
 | `PF-ARG-0013` | ARG | fatal | testnet mainnet | agave-validator | No removed TPU connection pool argument | --tpu-connection-pool-size, absent from agave-validator --help | 4.3.0-beta.0 |
 | `PF-ARG-0014` | ARG | degraded | local testnet mainnet | agave-validator | Every flag that takes a value has one | value placeholders in agave-validator --help | 4.3.0-beta.0 |
+| `PF-SVC-0001` | SVC | degraded | testnet mainnet | agave-validator solana-test-validator firedancer unknown | Unit depends on the mounts it writes to | systemd.unit(5), RequiresMountsFor= | 2026-09 |
 | `PF-XDP-0001` | XDP | degraded | local testnet mainnet | agave-validator | XDP capabilities are in the permitted set | v4.0 Validator/Breaking (#9133)<br>v4.2 Validator/Breaking | v4.2.1<br>v4.2.1 |
+| `PF-XDP-0002` | XDP | degraded | local testnet mainnet | agave-validator | Unit capabilities reached the process | systemd 246 NEWS, CAP_BPF and CAP_PERFMON name support | 2026-09 |
 | `PF-XDP-0007` | XDP | degraded | testnet mainnet | agave-validator | Capabilities come from the unit, not from setcap | v4.0 Validator/Breaking (#9133) | v4.2.1 |
 

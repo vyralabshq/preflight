@@ -5,7 +5,7 @@
 //! stays greppable and boring.
 
 use crate::{
-    checks::{arg, fs, hw, kernel, net, xdp},
+    checks::{arg, fs, hw, kernel, net, service, xdp},
     model::{Check, ClientKind::*, Layer, Profile::*, Severity::*},
 };
 
@@ -425,6 +425,17 @@ pub static CHECKS: &[Check] = &[
         run: arg::flags_have_values,
     },
     Check {
+        id: "PF-SVC-0001",
+        layer: Layer::Service,
+        severity: Degraded,
+        title: "Unit depends on the mounts it writes to",
+        profiles: &[Testnet, Mainnet],
+        clients: ANY_CLIENT,
+        needs_root: false,
+        source: service::S_MOUNTS,
+        run: service::requires_its_mounts,
+    },
+    Check {
         id: "PF-XDP-0001",
         layer: Layer::Xdp,
         severity: Degraded,
@@ -434,6 +445,17 @@ pub static CHECKS: &[Check] = &[
         needs_root: false,
         source: xdp::S_CAPS,
         run: xdp::capabilities,
+    },
+    Check {
+        id: "PF-XDP-0002",
+        layer: Layer::Xdp,
+        severity: Degraded,
+        title: "Unit capabilities reached the process",
+        profiles: &[Local, Testnet, Mainnet],
+        clients: AGAVE,
+        needs_root: false,
+        source: xdp::S_CAP_APPLIED,
+        run: xdp::unit_capabilities_took_effect,
     },
     Check {
         id: "PF-XDP-0007",

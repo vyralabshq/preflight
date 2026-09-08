@@ -2782,3 +2782,184 @@ fn a_clear_pinned_core_names_itself_once() {
         "the core is named once, not twice:\n{block}"
     );
 }
+
+/// Found on a live box: the unit asked for four capabilities and systemd 245
+/// applied two, because it does not know the CAP_BPF and CAP_PERFMON names.
+/// systemctl shows what systemd parsed, so nothing reports the difference.
+#[test]
+fn capabilities_the_unit_asks_for_that_never_arrive() {
+    let old_systemd = Host {
+        name: "caps-dropped-by-systemd",
+        files: &[
+            (
+                "/etc/systemd/system/sol.service",
+                "[Service]\nUser=sol\nExecStart=/home/sol/bin/validator.sh\n",
+            ),
+            (
+                "/etc/systemd/system/sol.service.d/override.conf",
+                "[Service]\n\
+                 AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN CAP_BPF CAP_PERFMON\n\
+                 CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN CAP_BPF CAP_PERFMON\n",
+            ),
+            (
+                "/home/sol/bin/validator.sh",
+                "#!/usr/bin/env bash\nexec agave-validator \\\n\
+                 --identity /home/sol/validator-keypair.json \\\n\
+                 --vote-account /home/sol/vote-account-keypair.json \\\n\
+                 --entrypoint entrypoint.testnet.solana.com:8001 \\\n\
+                 --ledger /mnt/ledger \\\n\
+                 --accounts /mnt/accounts \\\n\
+                 --dynamic-port-range 8000-8030\n",
+            ),
+            (
+                "/proc/4242/cmdline",
+                "agave-validator\0--ledger\0/mnt/ledger\0",
+            ),
+            // 0x3000 is bits 12 and 13: NET_ADMIN and NET_RAW, nothing else.
+            (
+                "/proc/4242/status",
+                "Name:\tagave-validator\nUid:\t1001\t1001\t1001\t1001\n\
+                 CapPrm:\t0000000000000000\nCapBnd:\t0000000000003000\n",
+            ),
+            ("/proc/4242/cgroup", "0::/system.slice/sol.service\n"),
+        ],
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let (o, _) = run(&[
+        "--root",
+        &host(&old_systemd),
+        "--client",
+        "agave-validator@4.3.0",
+        "--profile",
+        "testnet",
+    ]);
+    let block = block_for(&o, "PF-XDP-0002");
+    assert!(block.contains("FAIL"), "{block}");
+    assert!(
+        flat(block).contains("asks for 4 capabilities, the process holds 2"),
+        "count both sides:\n{block}"
+    );
+    assert!(
+        flat(block).contains("CAP_BPF and CAP_PERFMON never reached it"),
+        "name which ones:\n{block}"
+    );
+}
+
+/// A capability preflight has no bit for cannot be called missing. That would
+/// invent a finding out of preflight's own gap rather than the operator's.
+#[test]
+fn an_unplaceable_capability_is_unknown_not_missing() {
+    let exotic = Host {
+        name: "caps-unknown-name",
+        files: &[
+            (
+                "/etc/systemd/system/sol.service",
+                "[Service]\nUser=sol\n\
+                 CapabilityBoundingSet=CAP_NET_RAW CAP_WAKE_ALARM\n\
+                 ExecStart=/home/sol/bin/validator.sh\n",
+            ),
+            (
+                "/home/sol/bin/validator.sh",
+                "#!/usr/bin/env bash\nexec agave-validator \\\n\
+                 --identity /home/sol/validator-keypair.json \\\n\
+                 --vote-account /home/sol/vote-account-keypair.json \\\n\
+                 --entrypoint entrypoint.testnet.solana.com:8001 \\\n\
+                 --ledger /mnt/ledger \\\n\
+                 --accounts /mnt/accounts \\\n\
+                 --dynamic-port-range 8000-8030\n",
+            ),
+            (
+                "/proc/4242/cmdline",
+                "agave-validator\0--ledger\0/mnt/ledger\0",
+            ),
+            (
+                "/proc/4242/status",
+                "Name:\tagave-validator\nUid:\t1001\t1001\t1001\t1001\n\
+                 CapBnd:\t0000000000002000\n",
+            ),
+            ("/proc/4242/cgroup", "0::/system.slice/sol.service\n"),
+        ],
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let (o, _) = run(&[
+        "--root",
+        &host(&exotic),
+        "--client",
+        "agave-validator@4.3.0",
+        "--profile",
+        "testnet",
+        "-v",
+    ]);
+    let block = block_for(&o, "PF-XDP-0002");
+    assert!(block.contains("UNKNOWN"), "{block}");
+    assert!(
+        flat(block).contains("cannot place CAP_WAKE_ALARM"),
+        "{block}"
+    );
+}
+
+/// A mount that fails leaves the mountpoint an empty directory on the root
+/// filesystem, and a unit that only orders after local-fs.target starts anyway
+/// and writes there. Nothing reports it until the root filesystem fills.
+#[test]
+fn a_unit_that_does_not_depend_on_its_mounts_is_a_finding() {
+    let (o, _) = run(&[
+        "--root",
+        &host(&WRAPPER_SCRIPT_UNIT),
+        "--client",
+        "agave-validator@4.3.0",
+        "--profile",
+        "testnet",
+    ]);
+    let block = block_for(&o, "PF-SVC-0001");
+    assert!(block.contains("FAIL"), "{block}");
+    assert!(
+        flat(block).contains("sit on their own mounts"),
+        "plural when there is more than one:\n{block}"
+    );
+    assert!(
+        flat(block).contains("RequiresMountsFor=/mnt/accounts /mnt/ledger"),
+        "the drop-in names the paths:\n{block}"
+    );
+    assert!(
+        flat(block).contains("running validator is untouched"),
+        "daemon-reload changes the next start, not this one:\n{block}"
+    );
+
+    // Declaring them clears it, and a parent path covers what is under it.
+    let declared = Host {
+        name: "unit-requires-mounts",
+        files: &[
+            (
+                "/etc/systemd/system/sol.service",
+                "[Unit]\nRequiresMountsFor=/mnt\n\n\
+                 [Service]\nUser=sol\nExecStart=/home/sol/bin/validator.sh\n",
+            ),
+            (
+                "/home/sol/bin/validator.sh",
+                "#!/usr/bin/env bash\nexec agave-validator \\\n\
+                 --identity /home/sol/validator-keypair.json \\\n\
+                 --vote-account /home/sol/vote-account-keypair.json \\\n\
+                 --entrypoint entrypoint.testnet.solana.com:8001 \\\n\
+                 --ledger /mnt/ledger \\\n\
+                 --accounts /mnt/accounts \\\n\
+                 --dynamic-port-range 8000-8030\n",
+            ),
+        ],
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let (o, _) = run(&[
+        "--root",
+        &host(&declared),
+        "--client",
+        "agave-validator@4.3.0",
+        "--profile",
+        "testnet",
+        "-v",
+    ]);
+    assert!(
+        block_for(&o, "PF-SVC-0001").contains("PASS"),
+        "a parent path covers what is under it:\n{}",
+        block_for(&o, "PF-SVC-0001")
+    );
+}

@@ -473,7 +473,7 @@ impl Check {
     pub fn needs_a_validator(&self) -> bool {
         matches!(
             self.layer,
-            Layer::Arg | Layer::Xdp | Layer::Service | Layer::Validator
+            Layer::Arg | Layer::Xdp | Layer::Service | Layer::Validator | Layer::Security
         )
     }
 }

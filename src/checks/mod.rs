@@ -10,6 +10,7 @@ pub mod fs;
 pub mod hw;
 pub mod kernel;
 pub mod net;
+pub mod service;
 pub mod xdp;
 
 /// Host layers read /proc and /sys.
@@ -59,4 +60,34 @@ pub fn unit_directive(ctx: &Ctx, key: &str) -> Option<String> {
         }
     }
     found.filter(|v| !v.is_empty())
+}
+
+/// Every assignment of a directive, in drop-in order. Some systemd settings
+/// append across lines rather than replacing, so the last one is not the value.
+pub fn unit_directive_all(ctx: &Ctx, key: &str) -> Vec<String> {
+    let Some(unit) = ctx.inv().and_then(|i| i.unit_path.clone()) else {
+        return Vec::new();
+    };
+    let mut texts = Vec::new();
+    if let Ok(t) = ctx.fs.read(&unit) {
+        texts.push(t);
+    }
+    let mut drops = ctx.fs.list(format!("{unit}.d"));
+    drops.sort();
+    for p in drops {
+        if p.extension().is_some_and(|e| e == "conf")
+            && let Ok(t) = std::fs::read_to_string(&p)
+        {
+            texts.push(t);
+        }
+    }
+    let mut out = Vec::new();
+    for text in texts {
+        for line in text.lines() {
+            if let Some(v) = line.trim().strip_prefix(&format!("{key}=")) {
+                out.push(v.trim().trim_matches('"').to_string());
+            }
+        }
+    }
+    out
 }

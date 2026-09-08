@@ -3,7 +3,7 @@
 //! agave-validator on Linux hits the v4.2 capability gate like any other node.
 
 use crate::{
-    checks::unit_directive,
+    checks::{needs_linux, unit_directive},
     ctx::Ctx,
     model::{ClientKind, FixStep, Outcome, Persistence, Source, SourceKind::*},
 };
@@ -22,6 +22,14 @@ pub const S_CAPS: &[Source] = &[
         provisional: false,
     },
 ];
+/// systemd's own parser, and the kernel release the names came from.
+pub const S_CAP_APPLIED: &[Source] = &[Source {
+    kind: Operator,
+    locator: "systemd 246 NEWS, CAP_BPF and CAP_PERFMON name support",
+    verified_against: "2026-09",
+    provisional: false,
+}];
+
 pub const S_CAP_PERSIST: &[Source] = &[Source {
     kind: AgaveChangelog,
     locator: "v4.0 Validator/Breaking (#9133)",
@@ -85,11 +93,23 @@ fn client_gate(ctx: &Ctx) -> Option<Outcome> {
 
 /// Linux capability bits we care about. CapPrm is a hex mask of these.
 const CAP_BITS: &[(&str, u32)] = &[
+    ("CAP_IPC_LOCK", 14),
     ("CAP_NET_ADMIN", 12),
     ("CAP_NET_RAW", 13),
+    ("CAP_SYS_ADMIN", 21),
+    ("CAP_SYS_NICE", 23),
+    ("CAP_SYS_RESOURCE", 24),
+    // Both arrived in Linux 5.8 and systemd learned the names in 246.
     ("CAP_PERFMON", 38),
     ("CAP_BPF", 39),
 ];
+
+fn cap_bit(name: &str) -> Option<u32> {
+    CAP_BITS
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case(name))
+        .map(|(_, b)| *b)
+}
 
 fn cap_missing(mask: u64, required: &[&str]) -> Vec<String> {
     required
@@ -375,4 +395,89 @@ fn retained_capprm(ctx: &Ctx) -> Option<u64> {
         }
     }
     saw_one.then_some(union)
+}
+
+/// The bounding set the kernel gave the running process.
+fn runtime_capbnd(ctx: &Ctx) -> Option<u64> {
+    let pid = ctx.validator_pid.as_ref()?;
+    if !crate::privilege::valid_pid(&ctx.fs, pid) {
+        return None;
+    }
+    let status = ctx.fs.read(format!("/proc/{pid}/status")).ok()?;
+    let line = status.lines().find(|l| l.starts_with("CapBnd:"))?;
+    u64::from_str_radix(line.split_whitespace().nth(1)?, 16).ok()
+}
+
+/// PF-XDP-0002. What the unit asked for against what the kernel applied.
+pub fn unit_capabilities_took_effect(ctx: &Ctx) -> Outcome {
+    const WHY: &str = "A capability name systemd does not recognise is skipped with a warning and \
+        the rest of the line applies normally, so the unit reads as though all of them were \
+        granted. CAP_BPF and CAP_PERFMON arrived in Linux 5.8 and systemd learned the names in \
+        246, so on a distribution shipping 245 a unit asking for them silently gets a subset. \
+        Nothing reports the difference: systemctl shows what systemd parsed, not what the file \
+        asked for, and the process shows what it was given.";
+    const EXPECTED: &str = "every capability the unit names present in the process";
+
+    if let Some(o) = needs_linux(ctx, WHY) {
+        return o;
+    }
+    let Some(asked) = unit_directive(ctx, "CapabilityBoundingSet") else {
+        return Outcome::skipped("the unit sets no CapabilityBoundingSet");
+    };
+    let Some(mask) = runtime_capbnd(ctx) else {
+        return Outcome::skipped("no running validator whose bounding set could be read");
+    };
+
+    let names: Vec<&str> = asked.split_whitespace().collect();
+    let mut missing = Vec::new();
+    let mut unknown = Vec::new();
+    for n in &names {
+        match cap_bit(n) {
+            // Only a bit preflight knows can be compared. Calling an unknown
+            // name missing would invent a finding out of preflight's own gap.
+            None => unknown.push(n.to_uppercase()),
+            Some(b) if mask & (1u64 << b) == 0 => missing.push(n.to_uppercase()),
+            Some(_) => {}
+        }
+    }
+    let observed = format!(
+        "the unit asks for {} capabilit{}, the process holds {} of them",
+        names.len(),
+        match names.len() {
+            1 => "y",
+            _ => "ies",
+        },
+        names.len() - missing.len() - unknown.len()
+    );
+    if !unknown.is_empty() {
+        return Outcome::unknown(format!(
+            "{observed}; preflight cannot place {}",
+            unknown.join(" ")
+        ))
+        .expected(EXPECTED)
+        .why(WHY);
+    }
+    if missing.is_empty() {
+        return Outcome::pass(format!("{observed}, all of them"), EXPECTED).why(WHY);
+    }
+    Outcome::fail(
+        format!("{observed}; {} never reached it", missing.join(" and ")),
+        EXPECTED,
+    )
+    .why(WHY)
+    .fix(vec![
+        FixStep::noted(
+            "systemctl --version",
+            "246 or newer knows CAP_BPF and CAP_PERFMON; 245 and older do not",
+        ),
+        FixStep::noted(
+            format!(
+                "drop {} from the unit, or move to a release with a newer systemd",
+                missing.join(" and ")
+            ),
+            "leaving a name this systemd cannot parse is not harmful in itself, but the unit \
+             reads as though the capability were granted when it is not",
+        ),
+    ])
+    .verify("grep CapBnd /proc/$(pgrep -nf agave-validator)/status")
 }

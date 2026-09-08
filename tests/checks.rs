@@ -2543,3 +2543,121 @@ fn queues_stacked_on_one_core_are_a_finding() {
         "the disagreement is real and belongs in the fix:\n{block}"
     );
 }
+
+/// The flag says the core is reserved, the interrupt table says otherwise, and
+/// no single tool reads both. Needs the command line and /proc/interrupts at
+/// once, which is why nothing else catches it.
+#[test]
+fn a_pinned_core_draining_a_queue_is_a_finding() {
+    let collide = Host {
+        name: "poh-core-collision",
+        nic: Some(("ens3f0np0", "mlx5_core")),
+        files: &[
+            (
+                "/etc/systemd/system/sol.service",
+                "[Service]\nUser=sol\nExecStart=/home/sol/bin/validator.sh\n",
+            ),
+            (
+                "/home/sol/bin/validator.sh",
+                "#!/usr/bin/env bash\nexec agave-validator \\\n\
+                 --identity /home/sol/validator-keypair.json \\\n\
+                 --vote-account /home/sol/vote-account-keypair.json \\\n\
+                 --entrypoint entrypoint.testnet.solana.com:8001 \\\n\
+                 --ledger /mnt/ledger \\\n\
+                 --accounts /mnt/accounts \\\n\
+                 --dynamic-port-range 8000-8030 \\\n\
+                 --poh-pinned-cpu-core 10\n",
+            ),
+            (
+                "/proc/interrupts",
+                "  24:  1 2  IR-PCI-MSI 100-edge  ens3f0np0-TxRx-0\n\
+                 \x20 25:  1 2  IR-PCI-MSI 101-edge  ens3f0np0-TxRx-1\n",
+            ),
+            ("/proc/irq/24/smp_affinity_list", "10\n"),
+            ("/proc/irq/25/smp_affinity_list", "3\n"),
+            (
+                "/sys/devices/system/cpu/cpu10/topology/thread_siblings_list",
+                "10,26\n",
+            ),
+            (
+                "/sys/devices/system/cpu/cpu3/topology/thread_siblings_list",
+                "3,19\n",
+            ),
+        ],
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let (o, _) = run(&[
+        "--root",
+        &host(&collide),
+        "--client",
+        "agave-validator@4.3.0",
+        "--profile",
+        "testnet",
+    ]);
+    let block = block_for(&o, "PF-NET-0003");
+    assert!(block.contains("FAIL"), "{block}");
+    assert!(
+        flat(block).contains("--poh-pinned-cpu-core 10 also drains a queue"),
+        "name the flag and the core:\n{block}"
+    );
+    assert!(
+        flat(block).contains("needs no validator restart"),
+        "moving the interrupt is the cheap half:\n{block}"
+    );
+}
+
+/// An interrupt on the SMT sibling of a pinned core still steals that core's
+/// cycles, so the collision is on the physical core, not the thread.
+#[test]
+fn a_sibling_thread_draining_a_queue_counts_as_a_collision() {
+    let sibling = Host {
+        name: "poh-sibling-collision",
+        nic: Some(("ens3f0np0", "mlx5_core")),
+        files: &[
+            (
+                "/etc/systemd/system/sol.service",
+                "[Service]\nUser=sol\nExecStart=/home/sol/bin/validator.sh\n",
+            ),
+            (
+                "/home/sol/bin/validator.sh",
+                "#!/usr/bin/env bash\nexec agave-validator \\\n\
+                 --identity /home/sol/validator-keypair.json \\\n\
+                 --vote-account /home/sol/vote-account-keypair.json \\\n\
+                 --entrypoint entrypoint.testnet.solana.com:8001 \\\n\
+                 --ledger /mnt/ledger \\\n\
+                 --accounts /mnt/accounts \\\n\
+                 --dynamic-port-range 8000-8030 \\\n\
+                 --poh-pinned-cpu-core 10\n",
+            ),
+            (
+                "/proc/interrupts",
+                "  24:  1 2  IR-PCI-MSI 100-edge  ens3f0np0-TxRx-0\n",
+            ),
+            // CPU 26 is the other thread of the same physical core as 10.
+            ("/proc/irq/24/smp_affinity_list", "26\n"),
+            (
+                "/sys/devices/system/cpu/cpu10/topology/thread_siblings_list",
+                "10,26\n",
+            ),
+            (
+                "/sys/devices/system/cpu/cpu26/topology/thread_siblings_list",
+                "10,26\n",
+            ),
+        ],
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let (o, _) = run(&[
+        "--root",
+        &host(&sibling),
+        "--client",
+        "agave-validator@4.3.0",
+        "--profile",
+        "testnet",
+    ]);
+    let block = block_for(&o, "PF-NET-0003");
+    assert!(block.contains("FAIL"), "{block}");
+    assert!(
+        flat(block).contains("shares a physical core with CPU 26"),
+        "a sibling is the same core:\n{block}"
+    );
+}

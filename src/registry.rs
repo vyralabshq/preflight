@@ -260,6 +260,17 @@ pub static CHECKS: &[Check] = &[
         run: net::irq_affinity,
     },
     Check {
+        id: "PF-NET-0003",
+        layer: Layer::Net,
+        severity: Degraded,
+        title: "Pinned cores are clear of queue interrupts",
+        profiles: &[Testnet, Mainnet],
+        clients: AGAVE,
+        needs_root: false,
+        source: net::S_POH_IRQ,
+        run: net::pinned_core_collides_with_irq,
+    },
+    Check {
         id: "PF-ARG-0001",
         layer: Layer::Arg,
         severity: Fatal,

@@ -2726,3 +2726,59 @@ fn the_default_poh_core_is_checked_without_a_flag() {
         "the default comes from a symbol, so cite it:\n{block}"
     );
 }
+
+/// The passing path prints the pinned cores back, and the label already carries
+/// the core number. Printing both repeated it: "PoH's default core 0 0".
+#[test]
+fn a_clear_pinned_core_names_itself_once() {
+    let clear = Host {
+        name: "poh-core-clear",
+        nic: Some(("ens3f0np0", "mlx5_core")),
+        files: &[
+            (
+                "/etc/systemd/system/sol.service",
+                "[Service]\nUser=sol\nExecStart=/home/sol/bin/validator.sh\n",
+            ),
+            (
+                "/home/sol/bin/validator.sh",
+                "#!/usr/bin/env bash\nexec agave-validator \\\n\
+                 --identity /home/sol/validator-keypair.json \\\n\
+                 --vote-account /home/sol/vote-account-keypair.json \\\n\
+                 --entrypoint entrypoint.testnet.solana.com:8001 \\\n\
+                 --ledger /mnt/ledger \\\n\
+                 --accounts /mnt/accounts \\\n\
+                 --dynamic-port-range 8000-8030\n",
+            ),
+            (
+                "/proc/interrupts",
+                "  24:  1 2  IR-PCI-MSI 100-edge  ens3f0np0-TxRx-0\n",
+            ),
+            // Nowhere near core 0, so PoH's default core is clear.
+            ("/proc/irq/24/smp_affinity_list", "5\n"),
+            (
+                "/sys/devices/system/cpu/cpu0/topology/thread_siblings_list",
+                "0,16\n",
+            ),
+            (
+                "/sys/devices/system/cpu/cpu5/topology/thread_siblings_list",
+                "5,21\n",
+            ),
+        ],
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let (o, _) = run(&[
+        "--root",
+        &host(&clear),
+        "--client",
+        "agave-validator@4.3.0",
+        "--profile",
+        "testnet",
+        "-v",
+    ]);
+    let block = block_for(&o, "PF-NET-0003");
+    assert!(block.contains("PASS"), "{block}");
+    assert!(
+        flat(block).contains("PoH's default core 0 clear of"),
+        "the core is named once, not twice:\n{block}"
+    );
+}

@@ -10,10 +10,7 @@ use crate::{
     model::{FixStep, Outcome, Source, SourceKind::*},
 };
 
-/// Vendor guides, not Anza. Anza publishes nothing on interrupt affinity.
-/// Nobody publishes this one. It falls out of two things that are published:
-/// PoH is a sequential chain bound by single core speed, and a queue's
-/// interrupts land on the CPU it is pinned to.
+/// The pinned core is agave's, the consequence of the overlap is ours.
 pub const S_POH_IRQ: &[Source] = &[
     Source {
         kind: AgaveSymbol,
@@ -35,6 +32,7 @@ pub const S_POH_IRQ: &[Source] = &[
     },
 ];
 
+/// Vendor guides. Anza publishes nothing on interrupt affinity.
 pub const S_IRQ: &[Source] = &[
     Source {
         kind: Operator,
@@ -437,7 +435,7 @@ pub fn pinned_core_collides_with_irq(ctx: &Ctx) -> Outcome {
         })
         .collect();
 
-    let listed: Vec<String> = pinned.iter().map(|(f, c)| format!("{f} {c}")).collect();
+    let listed: Vec<String> = pinned.iter().map(|(label, _)| label.clone()).collect();
     if hits.is_empty() {
         return Outcome::pass(
             format!("{} clear of every queue interrupt", listed.join(", ")),

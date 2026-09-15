@@ -47,7 +47,7 @@ impl Severity {
     pub fn label(self) -> &'static str {
         match self {
             Severity::Fatal => "fatal",
-            Severity::Degraded => "degraded",
+            Severity::Degraded => "slows the node",
             Severity::Advisory => "advisory",
         }
     }
@@ -274,21 +274,31 @@ pub enum ValueCarry {
 pub struct FixStep {
     pub command: String,
     pub note: Option<String>,
+    pub runnable: bool,
 }
 
 impl FixStep {
+    /// A line that can be pasted into a shell.
     pub fn cmd(c: impl Into<String>) -> Self {
         FixStep {
             command: c.into(),
             note: None,
+            runnable: true,
         }
     }
 
-    pub fn noted(c: impl Into<String>, n: impl Into<String>) -> Self {
+    /// An instruction for a person: edit a file, plan an upgrade, fit a card.
+    pub fn step(c: impl Into<String>) -> Self {
         FixStep {
             command: c.into(),
-            note: Some(n.into()),
+            note: None,
+            runnable: false,
         }
+    }
+
+    pub fn note(mut self, n: impl Into<String>) -> Self {
+        self.note = Some(n.into());
+        self
     }
 
     /// A flag rename, rendered according to what is known about the value.
@@ -298,26 +308,30 @@ impl FixStep {
     /// up with the wrong number.
     pub fn rename(from: &str, to: &str, observed: Option<&str>, carry: ValueCarry) -> Self {
         match (carry, observed) {
-            (ValueCarry::Unverified, Some(v)) => FixStep::noted(
-                format!("{from} {v} is replaced by {to}"),
+            (ValueCarry::Unverified, Some(v)) => FixStep::step(format!(
+                "{from} {v} is replaced by {to}"
+            ))
+            .note(
                 "preflight has not read the replacement's unit from your binary, so it will not \
                  say what number goes there. Check both in agave-validator --help",
             ),
-            (ValueCarry::Unverified, None) => FixStep::noted(
-                format!("{from} is replaced by {to}"),
-                "preflight has not verified whether a value carries across. Check both in \
+            (ValueCarry::Unverified, None) => FixStep::step(format!("{from} is replaced by {to}"))
+                .note(
+                    "preflight has not verified whether a value carries across. Check both in \
                  agave-validator --help",
-            ),
+                ),
             (ValueCarry::NoValueSet, _) => {
-                FixStep::noted(format!("{from}   ->   {to}"), "no value to convert")
+                FixStep::step(format!("{from}   ->   {to}")).note("no value to convert")
             }
-            (ValueCarry::Identical, Some(v)) => FixStep::cmd(format!("{from} {v}   ->   {to} {v}")),
-            (ValueCarry::Identical, None) => FixStep::cmd(format!("{from}   ->   {to}")),
+            (ValueCarry::Identical, Some(v)) => {
+                FixStep::step(format!("{from} {v}   ->   {to} {v}"))
+            }
+            (ValueCarry::Identical, None) => FixStep::step(format!("{from}   ->   {to}")),
             (ValueCarry::Converted(note) | ValueCarry::DifferentSemantics(note), Some(v)) => {
-                FixStep::noted(format!("{from} {v}   ->   {to} <see note>"), note)
+                FixStep::step(format!("{from} {v}   ->   {to} <see note>")).note(note)
             }
             (ValueCarry::Converted(note) | ValueCarry::DifferentSemantics(note), None) => {
-                FixStep::noted(format!("{from}   ->   {to}"), note)
+                FixStep::step(format!("{from}   ->   {to}")).note(note)
             }
         }
     }

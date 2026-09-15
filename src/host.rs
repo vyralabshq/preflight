@@ -276,7 +276,7 @@ fn statvfs_gb(fs: &Rootfs, target: &str) -> Option<(f64, f64)> {
 
 /// A client version, parsed only as far as checks need it.
 ///
-/// Checks gate on floors — "this requirement starts at v4.1" — never on a
+/// Checks gate on floors, "this requirement starts at v4.1", never on a
 /// release channel. A floor stays correct forever: a flag removed in v4.0 is
 /// still removed in v5. A channel does not: today's alpha is next quarter's
 /// stable, and a hardcoded table would go quietly wrong with nothing to signal

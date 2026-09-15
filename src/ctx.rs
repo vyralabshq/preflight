@@ -36,7 +36,7 @@ pub struct Ctx {
     pub invocation_trail: Vec<String>,
     pub validator_pid: Option<String>,
     /// Whether this host has a validator at all: a binary, a unit, or a running
-    /// process. Absent one, checks are Skipped rather than Unknown — there is
+    /// process. Absent one, checks are Skipped rather than Unknown: there is
     /// nothing to probe, which is different from failing to probe it.
     pub validator_present: bool,
     pub os: Option<String>,

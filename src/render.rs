@@ -4,6 +4,8 @@
 //! box run a validator, and is the validator on it configured correctly. Also
 //! holds the JSON and markdown renderers.
 
+const SLOWS: &str = "slows the node";
+
 use crate::{
     ctx::{Ctx, VersionSource},
     host::REGISTRY_COVERS_THROUGH,
@@ -327,7 +329,16 @@ fn finding(f: &Finding, st: &Style, verbose: bool) -> String {
         let pad = " ".repeat(W + 2);
         for (i, step) in f.outcome.fix.iter().enumerate() {
             let label = if i == 0 { "fix" } else { "" };
-            s.push_str(&format!("  {label:<W$}{}\n", step.command));
+            // Runnable lines stay flush so they copy cleanly. Instructions get
+            // a marker. An indented line continues the one above it.
+            match (step.runnable, step.command.starts_with(' ')) {
+                (true, _) | (false, true) => {
+                    s.push_str(&format!("  {label:<W$}{}\n", step.command))
+                }
+                (false, false) => {
+                    s.push_str(&format!("  {:<w$}· {}\n", label, step.command, w = W - 2))
+                }
+            }
             if let Some(n) = &step.note {
                 s.push_str(&format!("{pad}{}\n", st.dim(&format!("({n})"))));
             }
@@ -467,7 +478,7 @@ fn phase_block(
     // 1.4 TB storage shortfall as "yes, with things worth fixing".
     let unsupported = count(Status::Unsupported);
     let fatal = with_severity("fatal");
-    let unmet = fatal + with_severity("degraded") + count(Status::Ephemeral);
+    let unmet = fatal + with_severity(SLOWS) + count(Status::Ephemeral);
     let advisory = with_severity("advisory");
     let unknown = count(Status::Unknown);
     let ran = mine.len() - count(Status::Skipped);
@@ -568,7 +579,7 @@ fn unmet_in(findings: &[Finding], phase: Phase) -> usize {
         .filter(|f| {
             f.phase == phase
                 && f.outcome.status == Status::Fail
-                && (f.severity == "fatal" || f.severity == "degraded")
+                && (f.severity == "fatal" || f.severity == SLOWS)
         })
         .count()
 }
@@ -665,7 +676,7 @@ fn summary(ctx: &Ctx, findings: &[Finding], st: &Style) -> String {
         .collect();
     let unmet = findings
         .iter()
-        .filter(|f| f.outcome.status == Status::Fail && f.severity == "degraded")
+        .filter(|f| f.outcome.status == Status::Fail && f.severity == SLOWS)
         .count();
     let advisory = findings
         .iter()
@@ -820,7 +831,7 @@ pub mod markdown {
             if matches!(f.outcome.status, Status::Pass | Status::Skipped) {
                 continue;
             }
-            s.push_str(&format!("\n### {} — {}\n\n", f.id, f.title));
+            s.push_str(&format!("\n### {}  {}\n\n", f.id, f.title));
             s.push_str(&format!("- **observed** {}\n", f.outcome.observed));
             if !f.outcome.expected.is_empty() {
                 s.push_str(&format!("- **expected** {}\n", f.outcome.expected));
@@ -828,11 +839,36 @@ pub mod markdown {
             if !f.outcome.why.is_empty() {
                 s.push_str(&format!("- **why** {}\n", f.outcome.why));
             }
-            if !f.outcome.fix.is_empty() {
-                s.push_str("\n```\n");
-                for step in &f.outcome.fix {
-                    s.push_str(&format!("{}\n", step.command));
+            // Only runnable steps get a fence. A fence says "run this", and
+            // prose inside one is the same trap as the text report had.
+            let mut fenced = false;
+            let mut first = true;
+            for step in &f.outcome.fix {
+                match step.runnable {
+                    true => {
+                        if !fenced {
+                            s.push_str("\n```\n");
+                            fenced = true;
+                        }
+                        s.push_str(&format!("{}\n", step.command));
+                    }
+                    false => {
+                        if fenced {
+                            s.push_str("```\n");
+                            fenced = false;
+                        }
+                        // An indented step continues the one above it.
+                        let (bullet, label) = match (step.command.starts_with(' '), first) {
+                            (true, _) => ("  -", ""),
+                            (false, true) => ("-", "**fix** "),
+                            (false, false) => ("-", ""),
+                        };
+                        first = false;
+                        s.push_str(&format!("{bullet} {label}{}\n", step.command.trim()));
+                    }
                 }
+            }
+            if fenced {
                 s.push_str("```\n");
             }
         }

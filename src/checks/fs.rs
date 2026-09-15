@@ -275,12 +275,10 @@ fn bare_box_capacity(ctx: &Ctx, sized: bool, why_sized: &str, why_headroom: &str
         ),
     };
     match sized && usable < NEED_TOTAL_GB {
-        true => Outcome::fail(observed, expected)
-            .why(why)
-            .fix(vec![FixStep::noted(
-                "accounts 1000 GB, ledger 1000 GB, snapshots 500 GB",
-                "high write endurance matters as much as size; validators write constantly",
-            )]),
+        true => Outcome::fail(observed, expected).why(why).fix(vec![
+            FixStep::step("accounts 1000 GB, ledger 1000 GB, snapshots 500 GB")
+                .note("high write endurance matters as much as size; validators write constantly"),
+        ]),
         false => Outcome::pass(observed, expected).why(why),
     }
 }
@@ -305,12 +303,11 @@ pub fn separate_devices(ctx: &Ctx) -> Outcome {
         // three devices is a real finding, at Degraded severity in the registry.
         return match ssds {
             0 => Outcome::unknown(observed).expected(EXPECTED).why(WHY),
-            1 | 2 => Outcome::fail(observed, EXPECTED)
-                .why(WHY)
-                .fix(vec![FixStep::noted(
-                    "plan for three devices: accounts, ledger, snapshots",
+            1 | 2 => Outcome::fail(observed, EXPECTED).why(WHY).fix(vec![
+                FixStep::step("plan for three devices: accounts, ledger, snapshots").note(
                     "sharing is permitted and the node will run; it has less headroom under load",
-                )]),
+                ),
+            ]),
             _ => Outcome::pass(observed, EXPECTED).why(WHY),
         };
     }
@@ -343,10 +340,11 @@ pub fn separate_devices(ctx: &Ctx) -> Outcome {
         (Some(a), Some(l)) if a == l => {
             Outcome::fail(format!("accounts and ledger both on {a}"), EXPECTED)
                 .why(WHY)
-                .fix(vec![FixStep::noted(
-                    "move accounts or ledger to its own device",
-                    "the node still runs either way; expect less headroom when the cluster is busy",
-                )])
+                .fix(vec![
+            FixStep::step("move accounts or ledger to its own device").note(
+                "the node still runs either way; expect less headroom when the cluster is busy",
+            ),
+        ])
         }
         _ => Outcome::pass(listing.join(", "), EXPECTED).why(WHY),
     }
@@ -472,10 +470,10 @@ pub fn direct_io_support(ctx: &Ctx) -> Outcome {
         EXPECTED,
     )
     .why(WHY)
-    .fix(vec![FixStep::noted(
-        "--no-accounts-db-snapshots-direct-io",
-        "or move the accounts path to ext4 or xfs, which is the better answer",
-    )])
+    .fix(vec![
+        FixStep::step("--no-accounts-db-snapshots-direct-io")
+            .note("or move the accounts path to ext4 or xfs, which is the better answer"),
+    ])
 }
 
 /// Agave's own sizing, from the comment block above DEFAULT_MAX_BLOCKSTORE_SHREDS.
@@ -653,13 +651,11 @@ fn retention_fix(ctx: &Ctx, target_gb: f64, room_gb: f64, bounded: bool) -> Vec<
         true => "if you shrink it: ",
         false => "if you shrink it, on the flag PF-ARG-0011 renames to: ",
     };
-    let mut steps = vec![FixStep::noted(
-        format!("{lead}--limit-blockstore-size {shreds:.0}"),
-        format!(
+    let mut steps =
+        vec![FixStep::step(format!("{lead}--limit-blockstore-size {shreds:.0}")).note(format!(
             "about 80% of the {room_gb:.0} GB free, against a {target_gb:.0} GB target. Subtract \
              what du reports before trusting it"
-        ),
-    )];
+        ))];
 
     // An idle device next door is the better answer than shrinking history.
     let idle: Vec<String> = ctx
@@ -676,13 +672,12 @@ fn retention_fix(ctx: &Ctx, target_gb: f64, room_gb: f64, bounded: bool) -> Vec<
         .map(|d| format!("{} holds {:.0} GB", d.name, d.size_gb))
         .collect();
     if !idle.is_empty() {
-        steps.push(FixStep::noted(
-            "or move the ledger or snapshots onto another device",
-            format!(
+        steps.push(
+            FixStep::step("or move the ledger or snapshots onto another device").note(format!(
                 "this host has {}. Splitting them is what Anza's separate-device layout is for",
                 idle.join(", ")
-            ),
-        ));
+            )),
+        );
     }
     steps
 }

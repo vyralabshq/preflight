@@ -189,10 +189,10 @@ pub fn xdp_driver_support(ctx: &Ctx) -> Outcome {
         return Outcome::unknown(format!("{iface} uses {driver}, which is not on the list"))
             .expected(EXPECTED)
             .why(WHY)
-            .fix(vec![FixStep::noted(
-                "check solanahcl.org, or report what you find",
-                "an absent driver means nobody has reported on it, not that it fails",
-            )]);
+            .fix(vec![
+                FixStep::step("check solanahcl.org, or report what you find")
+                    .note("an absent driver means nobody has reported on it, not that it fails"),
+            ]);
     };
 
     let zero_copy_wanted = ctx.inv().is_some_and(|i| {
@@ -204,16 +204,17 @@ pub fn xdp_driver_support(ctx: &Ctx) -> Outcome {
     match (&d.plain, &d.zero_copy, zero_copy_wanted) {
         (Xdp::No, ..) => Outcome::fail(observed, "a driver with native XDP support")
             .why(why)
-            .fix(vec![FixStep::noted(
-                "use --no-xdp, or fit a card on the supported list",
-                "without native XDP the node falls back to a slower path rather than failing",
-            )]),
+            .fix(vec![
+                FixStep::step("use --no-xdp, or fit a card on the supported list").note(
+                    "without native XDP the node falls back to a slower path rather than failing",
+                ),
+            ]),
         (_, Xdp::No | Xdp::Unstable, true) => Outcome::fail(
             format!("{observed}, and --xdp-zero-copy is set"),
             "zero copy off on this driver",
         )
         .why(why)
-        .fix(vec![FixStep::cmd("remove --xdp-zero-copy")]),
+        .fix(vec![FixStep::step("remove --xdp-zero-copy")]),
         (_, Xdp::Caveat, true) => Outcome::fail(
             format!("{observed}, and --xdp-zero-copy is set"),
             "kernel 6.14 or newer for zero copy on this driver",
@@ -327,24 +328,15 @@ pub fn irq_affinity(ctx: &Ctx) -> Outcome {
     Outcome::fail(format!("{layout}; {}", named.join("; ")), EXPECTED)
         .why(format!("{WHY}{drift}"))
         .fix(vec![
-            FixStep::noted(
-                "cat /sys/devices/system/cpu/cpu*/cache/index3/shared_cpu_list | sort -u",
-                "read the real cache topology first, then spread the queues evenly across it \
-                 rather than onto the first N cores",
-            ),
-            FixStep::noted(
-                format!(
+            FixStep::cmd("cat /sys/devices/system/cpu/cpu*/cache/index3/shared_cpu_list | sort -u").note("read the real cache topology first, then spread the queues evenly across it \
+                 rather than onto the first N cores"),
+            FixStep::step(format!(
                     "echo <cpu> | sudo tee /proc/irq/<irq>/smp_affinity_list   for each {iface} queue"
-                ),
-                "one queue per physical core. Look the interrupts up by name, since irq numbers \
-                 change across reboots",
-            ),
-            FixStep::noted(
-                "then decide about irqbalance",
-                "the vendor guides say disable it because it overrides manual affinity; Red Hat \
+                )).note("one queue per physical core. Look the interrupts up by name, since irq numbers \
+                 change across reboots"),
+            FixStep::step("then decide about irqbalance").note("the vendor guides say disable it because it overrides manual affinity; Red Hat \
                  says not to unless every interrupt source is pinned by hand, or they all land on \
-                 CPU 0. Pin them all, or leave it running and accept the drift",
-            ),
+                 CPU 0. Pin them all, or leave it running and accept the drift"),
         ])
         .verify(format!(
             "grep '{iface}-' /proc/interrupts | cut -d: -f1 | xargs -I{{}} cat /proc/irq/{{}}/smp_affinity_list"
@@ -445,12 +437,9 @@ pub fn pinned_core_collides_with_irq(ctx: &Ctx) -> Outcome {
     }
     Outcome::fail(hits.join("; "), EXPECTED)
         .why(WHY)
-        .fix(vec![FixStep::noted(
-            format!("move that queue to a core no pinned thread uses, or pass \
-                    --poh-pinned-cpu-core with one the {iface} queues avoid"),
-            "moving the interrupt takes effect immediately and needs no validator restart. \
-             Changing the flag needs one, so prefer moving the interrupt",
-        )])
+        .fix(vec![FixStep::step(format!("move that queue to a core no pinned thread uses, or pass \
+                    --poh-pinned-cpu-core with one the {iface} queues avoid")).note("moving the interrupt takes effect immediately and needs no validator restart. \
+             Changing the flag needs one, so prefer moving the interrupt")])
         .verify(format!(
             "grep '{iface}-' /proc/interrupts | cut -d: -f1 | xargs -I{{}} cat /proc/irq/{{}}/smp_affinity_list"
         ))

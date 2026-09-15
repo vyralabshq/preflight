@@ -1,3 +1,5 @@
+TMP := $(shell mktemp)
+
 .PHONY: help test check registry install clean
 
 ## show this list
@@ -21,6 +23,11 @@ test:
 check:
 	@cargo run --quiet -- $(ARGS); c=$$?; echo; echo "exit code $$c"; \
 	  exit $$c
+
+## regenerate docs/registry.md, the committed contract CI diffs against
+golden:
+	@cargo run --quiet -- --dump-registry > $(TMP) && test -s $(TMP) \
+	  && mv $(TMP) docs/registry.md && echo "docs/registry.md: $$(wc -l < docs/registry.md) lines"
 
 ## print every check and where its requirement comes from
 registry:

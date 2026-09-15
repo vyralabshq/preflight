@@ -73,10 +73,10 @@ pub fn flags_have_values(ctx: &Ctx) -> Outcome {
     let steps: Vec<FixStep> = empty
         .iter()
         .map(|f| {
-            FixStep::noted(
-                format!("give {f} a value, or drop the flag and take the default"),
-                "check the placeholder in agave-validator --help for the unit it expects",
-            )
+            FixStep::step(format!(
+                "give {f} a value, or drop the flag and take the default"
+            ))
+            .note("check the placeholder in agave-validator --help for the unit it expects")
         })
         .collect();
     Outcome::fail(format!("no value after {}", empty.join(", ")), EXPECTED)
@@ -282,10 +282,10 @@ fn require_version(ctx: &Ctx, major: u64, minor: u64) -> Result<(), Box<Outcome>
              preflight cannot tell whether it applies to you, and guessing would mean warning \
              operators about changes that do not affect them.",
                 )
-                .fix(vec![FixStep::noted(
-                    "preflight --client agave-validator@<version>",
-                    "get it with: agave-validator --version",
-                )]),
+                .fix(vec![
+                    FixStep::step("preflight --client agave-validator@<version>")
+                        .note("get it with: agave-validator --version"),
+                ]),
         )),
     }
 }
@@ -293,15 +293,14 @@ fn require_version(ctx: &Ctx, major: u64, minor: u64) -> Result<(), Box<Outcome>
 /// Open the file that holds the command line, apply the change, restart the unit.
 fn edit_steps(ctx: &Ctx, changes: Vec<FixStep>) -> Vec<FixStep> {
     let mut steps = vec![match ctx.inv().and_then(|i| i.fix_file.clone()) {
-        Some(f) => FixStep::cmd(format!("edit {f}")),
-        None => FixStep::noted(
-            "edit your validator command line",
-            "preflight could not resolve which file holds it; see the trail in the header",
-        ),
+        Some(f) => FixStep::step(format!("edit {f}")),
+        None => FixStep::step("edit your validator command line")
+            .note("preflight could not resolve which file holds it; see the trail in the header"),
     }];
     steps.extend(changes.into_iter().map(|c| FixStep {
         command: format!("  {}", c.command),
         note: c.note,
+        runnable: false,
     }));
     if let Some(u) = ctx.inv().and_then(|i| i.unit_name.clone()) {
         steps.push(FixStep::cmd(format!("sudo systemctl restart {u}")));
@@ -409,10 +408,13 @@ pub fn port_range(ctx: &Ctx) -> Outcome {
     .why(WHY)
     .fix(edit_steps(
         ctx,
-        vec![FixStep::noted(
-            format!("--dynamic-port-range {raw}   ->   {start}-{}", start + 30),
-            "30 leaves headroom above the 26 required",
-        )],
+        vec![
+            FixStep::step(format!(
+                "--dynamic-port-range {raw}   ->   {start}-{}",
+                start + 30
+            ))
+            .note("30 leaves headroom above the 26 required"),
+        ],
     ))
     .verify(format!("grep -- --dynamic-port-range {}", fix_file_or(ctx)))
 }
@@ -436,10 +438,7 @@ pub fn private_addr_xdp(ctx: &Ctx) -> Outcome {
         .why(WHY)
         .fix(edit_steps(
             ctx,
-            vec![FixStep::noted(
-                "add --no-xdp",
-                "alongside --allow-private-addr",
-            )],
+            vec![FixStep::step("add --no-xdp").note("alongside --allow-private-addr")],
         ))
 }
 
@@ -480,7 +479,7 @@ pub fn block_verification_method(ctx: &Ctx) -> Outcome {
                 .why(WHY)
                 .fix(edit_steps(
                     ctx,
-                    vec![FixStep::cmd(
+                    vec![FixStep::step(
                         "--block-verification-method blockstore-processor   ->   unified-scheduler",
                     )],
                 ))
@@ -512,7 +511,7 @@ pub fn block_production_method(ctx: &Ctx) -> Outcome {
         .why(WHY)
         .fix(edit_steps(
             ctx,
-            vec![FixStep::cmd(
+            vec![FixStep::step(
                 "--block-production-method central-scheduler   ->   central-scheduler-greedy",
             )],
         ))
@@ -628,6 +627,7 @@ pub fn deprecated_accounts_db(ctx: &Ctx) -> Outcome {
             FixStep {
                 command: format!("  {}", step.command),
                 note: step.note,
+                runnable: false,
             },
         );
     }
@@ -647,7 +647,7 @@ pub fn accounts_index_limit(ctx: &Ctx) -> Outcome {
     match inv.value("--accounts-index-limit").as_deref() {
         Some("minimal") => Outcome::fail("--accounts-index-limit minimal", EXPECTED)
             .why(WHY)
-            .fix(edit_steps(ctx, vec![FixStep::noted("--accounts-index-limit minimal   ->   --accounts-index-limit <size>", "pick a size for your box; 'minimal' does not mean the same thing across releases")])),
+            .fix(edit_steps(ctx, vec![FixStep::step("--accounts-index-limit minimal   ->   --accounts-index-limit <size>").note("pick a size for your box; 'minimal' does not mean the same thing across releases")])),
         Some(other) => Outcome::pass(format!("--accounts-index-limit {other}"), EXPECTED).why(WHY),
         None => Outcome::pass("not set", EXPECTED).why(WHY),
     }
@@ -696,7 +696,7 @@ pub fn direct_io(ctx: &Ctx) -> Outcome {
         .why(WHY)
         .fix(edit_steps(
             ctx,
-            vec![FixStep::cmd("add --no-accounts-db-snapshots-direct-io")],
+            vec![FixStep::step("add --no-accounts-db-snapshots-direct-io")],
         )),
         (false, true) => Outcome::pass(
             format!(
@@ -796,10 +796,10 @@ pub fn disable_banking_trace(ctx: &Ctx) -> Outcome {
         .why(WHY)
         .fix(edit_steps(
             ctx,
-            vec![FixStep::noted(
-                "remove --disable-banking-trace",
-                "to enable tracing instead, pass --enable-banking-trace <max bytes>",
-            )],
+            vec![
+                FixStep::step("remove --disable-banking-trace")
+                    .note("to enable tracing instead, pass --enable-banking-trace <max bytes>"),
+            ],
         ))
 }
 
@@ -819,6 +819,6 @@ pub fn tpu_connection_pool_size(ctx: &Ctx) -> Outcome {
         .why(WHY)
         .fix(edit_steps(
             ctx,
-            vec![FixStep::cmd("remove --tpu-connection-pool-size")],
+            vec![FixStep::step("remove --tpu-connection-pool-size")],
         ))
 }

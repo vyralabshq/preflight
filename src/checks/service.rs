@@ -84,18 +84,12 @@ pub fn requires_its_mounts(ctx: &Ctx) -> Outcome {
     .why(WHY)
     .fix(vec![
         FixStep::cmd(format!("sudo mkdir -p /etc/systemd/system/{unit}.d")),
-        FixStep::noted(
-            format!(
+        FixStep::cmd(format!(
                 "printf '[Unit]\\nRequiresMountsFor={}\\n' | sudo tee /etc/systemd/system/{unit}.d/10-mounts.conf",
                 uncovered.join(" ")
-            ),
-            "a drop-in, so the packaged unit stays as it is",
-        ),
-        FixStep::noted(
-            "sudo systemctl daemon-reload",
-            "this changes only what systemd does at the next start, so the running validator is \
-             untouched",
-        ),
+            )).note("a drop-in, so the packaged unit stays as it is"),
+        FixStep::cmd("sudo systemctl daemon-reload").note("this changes only what systemd does at the next start, so the running validator is \
+             untouched"),
     ])
     .verify(format!("systemctl show {unit} -p RequiresMountsFor"))
 }

@@ -83,7 +83,7 @@ fn persisted_in(ctx: &Ctx, key: &str, want: i64) -> Option<String> {
 
 /// `adequate_default` is a stock kernel value that already meets `want`.
 /// Only then is "not persisted" a non-event: the next reboot still has enough.
-/// A Ubuntu-shaped 212992 for rmem is below the floor, so it is not one — if
+/// A Ubuntu-shaped 212992 for rmem is below the floor, so it is not one. If
 /// live is high and no file sets it, that is Ephemeral on every distro.
 fn check_value(
     ctx: &Ctx,
@@ -98,19 +98,17 @@ fn check_value(
         return Outcome::unknown(format!("cannot read /proc/sys/{}", key.replace('.', "/")))
             .expected(expected)
             .why(why)
-            .fix(vec![FixStep::noted(
-                "run preflight on the prospective validator host",
-                "kernel settings live in /proc/sys, which only exists on Linux",
-            )]);
+            .fix(vec![
+                FixStep::step("run preflight on the prospective validator host")
+                    .note("kernel settings live in /proc/sys, which only exists on Linux"),
+            ]);
     };
 
     let persisted = persisted_in(ctx, key, want);
     let fix = vec![
         FixStep::cmd(format!("echo '{key} = {want}' | sudo tee -a {SYSCTL_FILE}")),
-        FixStep::noted(
-            format!("sudo sysctl -p {SYSCTL_FILE}"),
-            "applies it now; the file is what makes it survive a reboot",
-        ),
+        FixStep::cmd(format!("sudo sysctl -p {SYSCTL_FILE}"))
+            .note("applies it now; the file is what makes it survive a reboot"),
     ];
 
     if actual < want {
@@ -256,11 +254,8 @@ pub fn xdp_floor(ctx: &Ctx) -> Outcome {
         );
         if (major, minor) < AF_XDP_FLOOR {
             return Outcome::fail(observed, expected).why(WHY).fix(vec![
-                FixStep::noted(
-                    "--no-xdp",
-                    "the immediate action, back to UDP sockets today",
-                ),
-                FixStep::cmd(format!(
+                FixStep::step("--no-xdp").note("the immediate action, back to UDP sockets today"),
+                FixStep::step(format!(
                     "then upgrade the kernel to {}.{} or newer",
                     AF_XDP_FLOOR.0, AF_XDP_FLOOR.1
                 )),
@@ -299,14 +294,13 @@ pub fn xdp_floor(ctx: &Ctx) -> Outcome {
          for it."
     ))
     .fix(vec![
-        FixStep::noted(
-            "drop --xdp-zero-copy",
-            "copy mode is the default for a reason and stays available on this kernel",
-        ),
-        FixStep::noted(
-            format!("or upgrade the kernel to {}.{} or newer", floor.0, floor.1),
-            "on an older distribution that may mean a release upgrade",
-        ),
+        FixStep::step("drop --xdp-zero-copy")
+            .note("copy mode is the default for a reason and stays available on this kernel"),
+        FixStep::step(format!(
+            "or upgrade the kernel to {}.{} or newer",
+            floor.0, floor.1
+        ))
+        .note("on an older distribution that may mean a release upgrade"),
     ])
 }
 

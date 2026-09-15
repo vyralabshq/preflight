@@ -185,6 +185,127 @@ fn write(root: &Path, path: &str, body: &str) {
     fs::write(full, body).unwrap();
 }
 
+/// A validator host, described by what differs from a working one. Every test
+/// that hand writes a unit, a wrapper script and a /proc tree writes the same
+/// thirty lines to change one of them, and a fixture that quietly fails to
+/// resolve passes vacuously.
+pub struct Validator {
+    name: &'static str,
+    base: Host,
+    flags: Vec<String>,
+    files: Vec<(String, String)>,
+}
+
+pub fn validator(name: &'static str) -> Validator {
+    Validator {
+        name,
+        base: Host {
+            name,
+            files: &[],
+            ..WRAPPER_SCRIPT_UNIT
+        },
+        flags: Vec::new(),
+        files: Vec::new(),
+    }
+}
+
+impl Validator {
+    /// Extra flags on the wrapper script's exec line.
+    pub fn flags(mut self, f: &str) -> Self {
+        self.flags.push(f.to_string());
+        self
+    }
+
+    pub fn nic(mut self, iface: &'static str, driver: &'static str) -> Self {
+        self.base.nic = Some((iface, driver));
+        self
+    }
+
+    pub fn kernel(mut self, k: &'static str) -> Self {
+        self.base.kernel = k;
+        self
+    }
+
+    /// One queue interrupt, both halves written together. Kept apart they drift.
+    pub fn queue_irq(mut self, irq: u32, cpu: u32) -> Self {
+        let iface = self.base.nic.map(|(i, _)| i).unwrap_or("eth0");
+        let line = format!("  {irq}:  1 2  IR-PCI-MSI 100-edge  {iface}-TxRx-{irq}\n");
+        let existing = self.files.iter().position(|(p, _)| p == "/proc/interrupts");
+        match existing {
+            Some(i) => self.files[i].1.push_str(&line),
+            None => self.files.push(("/proc/interrupts".into(), line)),
+        }
+        self.files.push((
+            format!("/proc/irq/{irq}/smp_affinity_list"),
+            format!("{cpu}\n"),
+        ));
+        self
+    }
+
+    /// Two CPUs that are the SMT threads of one physical core.
+    pub fn siblings(mut self, a: u32, b: u32) -> Self {
+        for c in [a, b] {
+            self.files.push((
+                format!("/sys/devices/system/cpu/cpu{c}/topology/thread_siblings_list"),
+                format!("{a},{b}\n"),
+            ));
+        }
+        self
+    }
+
+    pub fn file(mut self, path: &str, body: &str) -> Self {
+        self.files.push((path.to_string(), body.to_string()));
+        self
+    }
+
+    pub fn build(self) -> PathBuf {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/fixtures")
+            .join(self.name);
+        build(&self.base);
+        write(
+            &root,
+            "/etc/systemd/system/sol.service",
+            "[Service]\nUser=sol\nExecStart=/home/sol/bin/validator.sh\n",
+        );
+        write(
+            &root,
+            "/home/sol/bin/validator.sh",
+            &format!(
+                "#!/usr/bin/env bash\nexec agave-validator \\\n\
+                 --identity /home/sol/validator-keypair.json \\\n\
+                 --vote-account /home/sol/vote-account-keypair.json \\\n\
+                 --entrypoint entrypoint.testnet.solana.com:8001 \\\n\
+                 --ledger /mnt/ledger \\\n\
+                 --accounts /mnt/accounts \\\n\
+                 --dynamic-port-range 8000-8030{}\n",
+                self.flags
+                    .iter()
+                    .map(|f| format!(" \\\n    {f}"))
+                    .collect::<String>()
+            ),
+        );
+        for (path, body) in &self.files {
+            write(&root, path, body);
+        }
+        root
+    }
+}
+
+/// A report for a fixture root, with the arguments every test passes anyway.
+pub fn report(root: &Path) -> String {
+    run(&[
+        "--root",
+        root.to_str().unwrap(),
+        "--client",
+        "agave-validator@4.3.0",
+        "--profile",
+        "testnet",
+        "-v",
+    ])
+    .0
+}
+
 /// Materialise a host under target/fixtures and return its root. Tests run in
 /// parallel, so each host is written exactly once per run.
 pub fn build(h: &Host) -> PathBuf {
@@ -1709,7 +1830,7 @@ fn reported_findings_carry_no_severity() {
         "-v",
     ]);
     for line in o.lines().filter(|l| l.contains("REPORTED")) {
-        for sev in ["fatal", "degraded", "advisory"] {
+        for sev in ["fatal", "slows the node", "advisory"] {
             assert!(!line.contains(sev), "REPORTED needs no severity: {line}");
         }
         assert_eq!(line, line.trim_end(), "no trailing space: {line:?}");
@@ -2496,55 +2617,18 @@ fn queues_stacked_on_one_core_are_a_finding() {
 }
 
 /// The flag says the core is reserved, the interrupt table says otherwise, and
-/// no single tool reads both. Needs the command line and /proc/interrupts at
-/// once, which is why nothing else catches it.
+/// no single tool reads both.
 #[test]
 fn a_pinned_core_draining_a_queue_is_a_finding() {
-    let collide = Host {
-        name: "poh-core-collision",
-        nic: Some(("ens3f0np0", "mlx5_core")),
-        files: &[
-            (
-                "/etc/systemd/system/sol.service",
-                "[Service]\nUser=sol\nExecStart=/home/sol/bin/validator.sh\n",
-            ),
-            (
-                "/home/sol/bin/validator.sh",
-                "#!/usr/bin/env bash\nexec agave-validator \\\n\
-                 --identity /home/sol/validator-keypair.json \\\n\
-                 --vote-account /home/sol/vote-account-keypair.json \\\n\
-                 --entrypoint entrypoint.testnet.solana.com:8001 \\\n\
-                 --ledger /mnt/ledger \\\n\
-                 --accounts /mnt/accounts \\\n\
-                 --dynamic-port-range 8000-8030 \\\n\
-                 --poh-pinned-cpu-core 10\n",
-            ),
-            (
-                "/proc/interrupts",
-                "  24:  1 2  IR-PCI-MSI 100-edge  ens3f0np0-TxRx-0\n\
-                 \x20 25:  1 2  IR-PCI-MSI 101-edge  ens3f0np0-TxRx-1\n",
-            ),
-            ("/proc/irq/24/smp_affinity_list", "10\n"),
-            ("/proc/irq/25/smp_affinity_list", "3\n"),
-            (
-                "/sys/devices/system/cpu/cpu10/topology/thread_siblings_list",
-                "10,26\n",
-            ),
-            (
-                "/sys/devices/system/cpu/cpu3/topology/thread_siblings_list",
-                "3,19\n",
-            ),
-        ],
-        ..WRAPPER_SCRIPT_UNIT
-    };
-    let (o, _) = run(&[
-        "--root",
-        &host(&collide),
-        "--client",
-        "agave-validator@4.3.0",
-        "--profile",
-        "testnet",
-    ]);
+    let root = validator("poh-core-collision")
+        .nic("ens3f0np0", "mlx5_core")
+        .flags("--poh-pinned-cpu-core 10")
+        .queue_irq(24, 10)
+        .queue_irq(25, 3)
+        .siblings(10, 26)
+        .siblings(3, 19)
+        .build();
+    let o = report(&root);
     let block = block_for(&o, "PF-NET-0003");
     assert!(block.contains("FAIL"), "{block}");
     assert!(
@@ -2557,112 +2641,18 @@ fn a_pinned_core_draining_a_queue_is_a_finding() {
     );
 }
 
-/// An interrupt on the SMT sibling of a pinned core still steals that core's
-/// cycles, so the collision is on the physical core, not the thread.
-#[test]
-fn a_sibling_thread_draining_a_queue_counts_as_a_collision() {
-    let sibling = Host {
-        name: "poh-sibling-collision",
-        nic: Some(("ens3f0np0", "mlx5_core")),
-        files: &[
-            (
-                "/etc/systemd/system/sol.service",
-                "[Service]\nUser=sol\nExecStart=/home/sol/bin/validator.sh\n",
-            ),
-            (
-                "/home/sol/bin/validator.sh",
-                "#!/usr/bin/env bash\nexec agave-validator \\\n\
-                 --identity /home/sol/validator-keypair.json \\\n\
-                 --vote-account /home/sol/vote-account-keypair.json \\\n\
-                 --entrypoint entrypoint.testnet.solana.com:8001 \\\n\
-                 --ledger /mnt/ledger \\\n\
-                 --accounts /mnt/accounts \\\n\
-                 --dynamic-port-range 8000-8030 \\\n\
-                 --poh-pinned-cpu-core 10\n",
-            ),
-            (
-                "/proc/interrupts",
-                "  24:  1 2  IR-PCI-MSI 100-edge  ens3f0np0-TxRx-0\n",
-            ),
-            // CPU 26 is the other thread of the same physical core as 10.
-            ("/proc/irq/24/smp_affinity_list", "26\n"),
-            (
-                "/sys/devices/system/cpu/cpu10/topology/thread_siblings_list",
-                "10,26\n",
-            ),
-            (
-                "/sys/devices/system/cpu/cpu26/topology/thread_siblings_list",
-                "10,26\n",
-            ),
-        ],
-        ..WRAPPER_SCRIPT_UNIT
-    };
-    let (o, _) = run(&[
-        "--root",
-        &host(&sibling),
-        "--client",
-        "agave-validator@4.3.0",
-        "--profile",
-        "testnet",
-    ]);
-    let block = block_for(&o, "PF-NET-0003");
-    assert!(block.contains("FAIL"), "{block}");
-    assert!(
-        flat(block).contains("shares a physical core with CPU 26"),
-        "a sibling is the same core:\n{block}"
-    );
-}
-
-/// Nobody passes the flag, so agave falls back to DEFAULT_PINNED_CPU_CORE,
-/// which is 0 on Linux. Core 0 is also where interrupts land by default. The
-/// check used to skip this case, which is the one most likely to be wrong.
+/// With no flag agave uses DEFAULT_PINNED_CPU_CORE, which is 0 on Linux, and
+/// core 0 is where interrupts land by default.
 #[test]
 fn the_default_poh_core_is_checked_without_a_flag() {
-    let default_core = Host {
-        name: "poh-default-core-0",
-        nic: Some(("ens3f0np0", "mlx5_core")),
-        files: &[
-            (
-                "/etc/systemd/system/sol.service",
-                "[Service]\nUser=sol\nExecStart=/home/sol/bin/validator.sh\n",
-            ),
-            // No --poh-pinned-cpu-core anywhere in here.
-            (
-                "/home/sol/bin/validator.sh",
-                "#!/usr/bin/env bash\nexec agave-validator \\\n\
-                 --identity /home/sol/validator-keypair.json \\\n\
-                 --vote-account /home/sol/vote-account-keypair.json \\\n\
-                 --entrypoint entrypoint.testnet.solana.com:8001 \\\n\
-                 --ledger /mnt/ledger \\\n\
-                 --accounts /mnt/accounts \\\n\
-                 --dynamic-port-range 8000-8030\n",
-            ),
-            (
-                "/proc/interrupts",
-                "  24:  1 2  IR-PCI-MSI 100-edge  ens3f0np0-TxRx-0\n\
-                 \x20 25:  1 2  IR-PCI-MSI 101-edge  ens3f0np0-TxRx-1\n",
-            ),
-            ("/proc/irq/24/smp_affinity_list", "0\n"),
-            ("/proc/irq/25/smp_affinity_list", "3\n"),
-            (
-                "/sys/devices/system/cpu/cpu0/topology/thread_siblings_list",
-                "0,16\n",
-            ),
-            (
-                "/sys/devices/system/cpu/cpu3/topology/thread_siblings_list",
-                "3,19\n",
-            ),
-        ],
-        ..WRAPPER_SCRIPT_UNIT
-    };
-    let (o, _) = run(&[
-        "--root",
-        &host(&default_core),
-        "--client",
-        "agave-validator@4.3.0",
-        "--profile",
-        "testnet",
-    ]);
+    let root = validator("poh-default-core-0")
+        .nic("ens3f0np0", "mlx5_core")
+        .queue_irq(24, 0)
+        .queue_irq(25, 3)
+        .siblings(0, 16)
+        .siblings(3, 19)
+        .build();
+    let o = report(&root);
     let block = block_for(&o, "PF-NET-0003");
     assert!(
         block.contains("FAIL"),
@@ -2675,62 +2665,6 @@ fn the_default_poh_core_is_checked_without_a_flag() {
     assert!(
         flat(block).contains("DEFAULT_PINNED_CPU_CORE"),
         "the default comes from a symbol, so cite it:\n{block}"
-    );
-}
-
-/// The passing path prints the pinned cores back, and the label already carries
-/// the core number. Printing both repeated it: "PoH's default core 0 0".
-#[test]
-fn a_clear_pinned_core_names_itself_once() {
-    let clear = Host {
-        name: "poh-core-clear",
-        nic: Some(("ens3f0np0", "mlx5_core")),
-        files: &[
-            (
-                "/etc/systemd/system/sol.service",
-                "[Service]\nUser=sol\nExecStart=/home/sol/bin/validator.sh\n",
-            ),
-            (
-                "/home/sol/bin/validator.sh",
-                "#!/usr/bin/env bash\nexec agave-validator \\\n\
-                 --identity /home/sol/validator-keypair.json \\\n\
-                 --vote-account /home/sol/vote-account-keypair.json \\\n\
-                 --entrypoint entrypoint.testnet.solana.com:8001 \\\n\
-                 --ledger /mnt/ledger \\\n\
-                 --accounts /mnt/accounts \\\n\
-                 --dynamic-port-range 8000-8030\n",
-            ),
-            (
-                "/proc/interrupts",
-                "  24:  1 2  IR-PCI-MSI 100-edge  ens3f0np0-TxRx-0\n",
-            ),
-            // Nowhere near core 0, so PoH's default core is clear.
-            ("/proc/irq/24/smp_affinity_list", "5\n"),
-            (
-                "/sys/devices/system/cpu/cpu0/topology/thread_siblings_list",
-                "0,16\n",
-            ),
-            (
-                "/sys/devices/system/cpu/cpu5/topology/thread_siblings_list",
-                "5,21\n",
-            ),
-        ],
-        ..WRAPPER_SCRIPT_UNIT
-    };
-    let (o, _) = run(&[
-        "--root",
-        &host(&clear),
-        "--client",
-        "agave-validator@4.3.0",
-        "--profile",
-        "testnet",
-        "-v",
-    ]);
-    let block = block_for(&o, "PF-NET-0003");
-    assert!(block.contains("PASS"), "{block}");
-    assert!(
-        flat(block).contains("PoH's default core 0 clear of"),
-        "the core is named once, not twice:\n{block}"
     );
 }
 
@@ -2849,59 +2783,6 @@ fn a_capability_this_configuration_needs_is_a_failure() {
     assert!(
         flat(block).contains("this configuration needs it"),
         "say that it is actually needed here:\n{block}"
-    );
-}
-
-/// A capability preflight has no bit for cannot be called missing. That would
-/// invent a finding out of preflight's own gap rather than the operator's.
-#[test]
-fn an_unplaceable_capability_is_unknown_not_missing() {
-    let exotic = Host {
-        name: "caps-unknown-name",
-        files: &[
-            (
-                "/etc/systemd/system/sol.service",
-                "[Service]\nUser=sol\n\
-                 CapabilityBoundingSet=CAP_NET_RAW CAP_WAKE_ALARM\n\
-                 ExecStart=/home/sol/bin/validator.sh\n",
-            ),
-            (
-                "/home/sol/bin/validator.sh",
-                "#!/usr/bin/env bash\nexec agave-validator \\\n\
-                 --identity /home/sol/validator-keypair.json \\\n\
-                 --vote-account /home/sol/vote-account-keypair.json \\\n\
-                 --entrypoint entrypoint.testnet.solana.com:8001 \\\n\
-                 --ledger /mnt/ledger \\\n\
-                 --accounts /mnt/accounts \\\n\
-                 --dynamic-port-range 8000-8030\n",
-            ),
-            (
-                "/proc/4242/cmdline",
-                "agave-validator\0--ledger\0/mnt/ledger\0",
-            ),
-            (
-                "/proc/4242/status",
-                "Name:\tagave-validator\nUid:\t1001\t1001\t1001\t1001\n\
-                 CapBnd:\t0000000000002000\n",
-            ),
-            ("/proc/4242/cgroup", "0::/system.slice/sol.service\n"),
-        ],
-        ..WRAPPER_SCRIPT_UNIT
-    };
-    let (o, _) = run(&[
-        "--root",
-        &host(&exotic),
-        "--client",
-        "agave-validator@4.3.0",
-        "--profile",
-        "testnet",
-        "-v",
-    ]);
-    let block = block_for(&o, "PF-XDP-0002");
-    assert!(block.contains("UNKNOWN"), "{block}");
-    assert!(
-        flat(block).contains("cannot place CAP_WAKE_ALARM"),
-        "{block}"
     );
 }
 
@@ -3025,47 +2906,6 @@ fn a_packaged_unit_is_read_with_its_etc_drop_in() {
     );
 }
 
-/// An admin copy in /etc outranks a packaged one of the same name.
-#[test]
-fn an_etc_unit_outranks_a_packaged_one() {
-    let both = Host {
-        name: "unit-in-two-places",
-        files: &[
-            (
-                "/usr/lib/systemd/system/sol.service",
-                "[Service]\nUser=nobody\nExecStart=/usr/bin/agave-validator --ledger /wrong\n",
-            ),
-            (
-                "/etc/systemd/system/sol.service",
-                "[Service]\nUser=sol\nExecStart=/home/sol/bin/validator.sh\n",
-            ),
-            (
-                "/home/sol/bin/validator.sh",
-                "#!/usr/bin/env bash\nexec agave-validator \\\n\
-                 --identity /home/sol/validator-keypair.json \\\n\
-                 --vote-account /home/sol/vote-account-keypair.json \\\n\
-                 --entrypoint entrypoint.testnet.solana.com:8001 \\\n\
-                 --ledger /mnt/ledger \\\n\
-                 --accounts /mnt/accounts \\\n\
-                 --dynamic-port-range 8000-8030\n",
-            ),
-        ],
-        ..WRAPPER_SCRIPT_UNIT
-    };
-    let (o, _) = run(&[
-        "--root",
-        &host(&both),
-        "--client",
-        "agave-validator@4.3.0",
-        "--profile",
-        "testnet",
-    ]);
-    assert!(
-        !flat(&o).contains("/wrong"),
-        "the packaged unit must not win over the administrator's:\n{o}"
-    );
-}
-
 /// A packaged unit is not the operator's to edit, so the fix file is a
 /// drop-in under /etc, and it has to read as a path where it is printed.
 #[test]
@@ -3151,14 +2991,140 @@ fn a_unit_is_found_by_following_execstart_not_by_its_wording() {
     );
 }
 
-/// A unit installed by hand into /usr/local/lib was never searched at all.
+/// A step rendered as runnable has to actually be runnable. Prose pasted into
+/// a shell is how this went wrong on a real box.
 #[test]
-fn a_unit_in_usr_local_lib_is_found() {
-    let local = Host {
-        name: "unit-in-usr-local",
+fn a_runnable_fix_step_is_really_a_command() {
+    const NOT_A_COMMAND: &[&str] = &[
+        "add ",
+        "plan ",
+        "move ",
+        "edit ",
+        "remove ",
+        "then ",
+        "drop ",
+        "use ",
+        "check ",
+        "give ",
+        "measure ",
+        "or ",
+        "run preflight",
+    ];
+    let mut checked = 0;
+    // Every fixture, so the scan sees every fix block, not one host's few.
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/fixtures");
+    let mut roots: Vec<String> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.path().to_string_lossy().to_string())
+        .collect();
+    roots.sort();
+    assert!(
+        roots.len() > 20,
+        "build the fixtures first: {}",
+        roots.len()
+    );
+    for root in roots {
+        for profile in ["testnet", "mainnet"] {
+            let (o, _) = run(&[
+                "--root",
+                &root,
+                "--client",
+                "agave-validator@4.2.1",
+                "--profile",
+                profile,
+                "-v",
+            ]);
+            let mut in_fix = false;
+            for line in o.lines() {
+                if line.starts_with("  fix ") {
+                    in_fix = true;
+                } else if !line.starts_with("          ") {
+                    in_fix = false;
+                }
+                if !in_fix {
+                    continue;
+                }
+                let body = line.trim_start_matches(' ').trim_start_matches("fix ");
+                let body = body.trim_start();
+                // markers, notes and continuations are not claims to run
+                if body.starts_with('·') || body.starts_with('(') || body.is_empty() {
+                    continue;
+                }
+                if line.starts_with("            ") && !line.starts_with("  fix ") {
+                    // indented past the fix column: a continuation
+                    if line.chars().nth(12).is_some_and(|c| c == ' ') {
+                        continue;
+                    }
+                }
+                checked += 1;
+                assert!(
+                    !NOT_A_COMMAND.iter().any(|p| body.starts_with(p)),
+                    "rendered as runnable but reads as prose: {body:?}"
+                );
+                assert!(
+                    !body.contains('<'),
+                    "a placeholder cannot be pasted, so it is not runnable: {body:?}"
+                );
+            }
+        }
+    }
+    assert!(
+        checked > 5,
+        "the scan found almost nothing, it is not working"
+    );
+}
+
+/// An interrupt on the SMT sibling of a pinned core still steals its cycles.
+#[test]
+fn a_sibling_thread_draining_a_queue_counts_as_a_collision() {
+    let root = validator("poh-sibling-collision")
+        .nic("ens3f0np0", "mlx5_core")
+        .flags("--poh-pinned-cpu-core 10")
+        .queue_irq(24, 26)
+        .siblings(10, 26)
+        .build();
+    let o = report(&root);
+    let block = block_for(&o, "PF-NET-0003");
+    assert!(block.contains("FAIL"), "{block}");
+    assert!(
+        flat(block).contains("shares a physical core with CPU 26"),
+        "a sibling is the same core:\n{block}"
+    );
+}
+
+/// The label already carries the core number, and printing both repeated it.
+#[test]
+fn a_clear_pinned_core_names_itself_once() {
+    let root = validator("poh-core-clear")
+        .nic("ens3f0np0", "mlx5_core")
+        .queue_irq(24, 5)
+        .siblings(0, 16)
+        .siblings(5, 21)
+        .build();
+    let o = report(&root);
+    let block = block_for(&o, "PF-NET-0003");
+    assert!(block.contains("PASS"), "{block}");
+    assert!(
+        flat(block).contains("PoH's default core 0 clear of"),
+        "the core is named once, not twice:\n{block}"
+    );
+}
+
+/// An admin copy in /etc outranks a packaged one of the same name.
+#[test]
+fn an_etc_unit_outranks_a_packaged_one() {
+    let both = Host {
+        name: "unit-in-two-places",
         files: &[
             (
-                "/usr/local/lib/systemd/system/sol.service",
+                "/usr/lib/systemd/system/sol.service",
+                "[Service]\nUser=nobody\nExecStart=/usr/bin/agave-validator --ledger /wrong\n",
+            ),
+            (
+                "/etc/systemd/system/sol.service",
                 "[Service]\nUser=sol\nExecStart=/home/sol/bin/validator.sh\n",
             ),
             (
@@ -3176,14 +3142,83 @@ fn a_unit_in_usr_local_lib_is_found() {
     };
     let (o, _) = run(&[
         "--root",
-        &host(&local),
+        &host(&both),
         "--client",
         "agave-validator@4.3.0",
         "--profile",
         "testnet",
     ]);
     assert!(
-        !flat(&o).contains("no validator invocation could be resolved"),
-        "/usr/local/lib is in systemd's load path:\n{o}"
+        !flat(&o).contains("/wrong"),
+        "the packaged unit must not win over the administrator's:\n{o}"
+    );
+}
+
+/// A unit installed by hand into /usr/local/lib was never searched at all.
+#[test]
+fn a_unit_in_usr_local_lib_is_found() {
+    let root = validator("unit-in-usr-local")
+        .file(
+            "/usr/local/lib/systemd/system/other.service",
+            "[Service]\nUser=sol\nExecStart=/home/sol/bin/validator.sh\n",
+        )
+        .file("/etc/systemd/system/sol.service", "")
+        .build();
+    assert!(
+        !flat(&report(&root)).contains("no validator invocation could be resolved"),
+        "/usr/local/lib is in systemd's load path"
+    );
+}
+
+/// A capability preflight has no bit for cannot be called missing. That would
+/// invent a finding out of preflight's own gap rather than the operator's.
+#[test]
+fn an_unplaceable_capability_is_unknown_not_missing() {
+    let exotic = Host {
+        name: "caps-unknown-name",
+        files: &[
+            (
+                "/etc/systemd/system/sol.service",
+                "[Service]\nUser=sol\n\
+                 CapabilityBoundingSet=CAP_NET_RAW CAP_WAKE_ALARM\n\
+                 ExecStart=/home/sol/bin/validator.sh\n",
+            ),
+            (
+                "/home/sol/bin/validator.sh",
+                "#!/usr/bin/env bash\nexec agave-validator \\\n\
+                 --identity /home/sol/validator-keypair.json \\\n\
+                 --vote-account /home/sol/vote-account-keypair.json \\\n\
+                 --entrypoint entrypoint.testnet.solana.com:8001 \\\n\
+                 --ledger /mnt/ledger \\\n\
+                 --accounts /mnt/accounts \\\n\
+                 --dynamic-port-range 8000-8030\n",
+            ),
+            (
+                "/proc/4242/cmdline",
+                "agave-validator\0--ledger\0/mnt/ledger\0",
+            ),
+            (
+                "/proc/4242/status",
+                "Name:\tagave-validator\nUid:\t1001\t1001\t1001\t1001\n\
+                 CapBnd:\t0000000000002000\n",
+            ),
+            ("/proc/4242/cgroup", "0::/system.slice/sol.service\n"),
+        ],
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let (o, _) = run(&[
+        "--root",
+        &host(&exotic),
+        "--client",
+        "agave-validator@4.3.0",
+        "--profile",
+        "testnet",
+        "-v",
+    ]);
+    let block = block_for(&o, "PF-XDP-0002");
+    assert!(block.contains("UNKNOWN"), "{block}");
+    assert!(
+        flat(block).contains("cannot place CAP_WAKE_ALARM"),
+        "{block}"
     );
 }

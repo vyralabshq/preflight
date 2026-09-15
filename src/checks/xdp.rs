@@ -280,12 +280,9 @@ fn capability_fix(ctx: &Ctx, required: &[&str], bounding: Option<&str>) -> Vec<F
     };
     vec![
         FixStep::cmd(format!("sudo mkdir -p /etc/systemd/system/{unit}.d")),
-        FixStep::noted(
-            format!(
+        FixStep::cmd(format!(
                 "printf '[Service]\\n{body}\\n' | sudo tee /etc/systemd/system/{unit}.d/20-xdp-caps.conf"
-            ),
-            note,
-        ),
+            )).note(note),
         FixStep::cmd("sudo systemctl daemon-reload"),
         FixStep::cmd(format!("sudo systemctl restart {unit}")),
     ]
@@ -360,10 +357,7 @@ pub fn capability_persistence(ctx: &Ctx) -> Outcome {
              every time the binary is replaced. The node works for weeks, then fails to start \
              after a routine upgrade, and the two events look unrelated.",
         )
-        .fix(vec![FixStep::noted(
-            format!("move the grant into /etc/systemd/system/{unit}.d/20-xdp-caps.conf as AmbientCapabilities="),
-            "or re-run setcap after every agave-install, which nobody remembers to do",
-        )])
+        .fix(vec![FixStep::step(format!("move the grant into /etc/systemd/system/{unit}.d/20-xdp-caps.conf as AmbientCapabilities=")).note("or re-run setcap after every agave-install, which nobody remembers to do")])
         .verify("getcap $(which agave-validator)")
         .persists(Persistence::unit_dropin(None, &unit)),
     }
@@ -495,15 +489,13 @@ pub fn unit_capabilities_took_effect(ctx: &Ctx) -> Outcome {
     )
     .why(WHY)
     .fix(vec![
-        FixStep::noted(
-            "systemctl --version",
-            "246 or newer knows CAP_BPF and CAP_PERFMON; 245 and older do not",
-        ),
-        FixStep::noted(
-            format!(
-                "drop {} from the unit, or move to a release with a newer systemd",
-                missing.join(" and ")
-            ),
+        FixStep::cmd("systemctl --version")
+            .note("246 or newer knows CAP_BPF and CAP_PERFMON; 245 and older do not"),
+        FixStep::step(format!(
+            "drop {} from the unit, or move to a release with a newer systemd",
+            missing.join(" and ")
+        ))
+        .note(
             "leaving a name this systemd cannot parse is not harmful in itself, but the unit \
              reads as though the capability were granted when it is not",
         ),

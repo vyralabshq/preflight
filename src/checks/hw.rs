@@ -138,12 +138,10 @@ pub fn base_clock(ctx: &Ctx) -> Outcome {
         let observed = format!("{model} at {m:.0} MHz base");
         return match m >= want {
             true => Outcome::pass(observed, EXPECTED).why(WHY),
-            false => Outcome::fail(observed, EXPECTED)
-                .why(WHY)
-                .fix(vec![FixStep::noted(
-                    "check the BIOS for a power or efficiency profile capping the clock",
-                    "a base below Anza's figure is usually firmware, not the silicon",
-                )]),
+            false => Outcome::fail(observed, EXPECTED).why(WHY).fix(vec![
+                FixStep::step("check the BIOS for a power or efficiency profile capping the clock")
+                    .note("a base below Anza's figure is usually firmware, not the silicon"),
+            ]),
         };
     }
 
@@ -204,7 +202,7 @@ pub fn memory(ctx: &Ctx) -> Outcome {
     const WHY: &str = "Anza's validator column lists 256 GB or more, suggests ECC, and suggests a \
         motherboard with 512 GB capacity. The 512 GB or more line is extra RAM for an RPC node \
         with all account indexes, not the validator floor. The page calls these a guide, and \
-        operators run testnet on far less — an invented 128 GB floor already false-failed a \
+        operators run testnet on far less. An invented 128 GB floor already false-failed a \
         working 125 GB testnet node. Accounts and index live in memory, so running short shows \
         up as an OOM kill hours into a run rather than at startup, which is why the figure is \
         worth seeing. preflight still does not fail on it.";
@@ -287,10 +285,7 @@ pub fn on_recommended_list(ctx: &Ctx) -> Outcome {
         None => {
             let o = Outcome::reported(format!("{model} is not on the list"), EXPECTED).why(WHY);
             match ctx.profile {
-                Profile::Mainnet => o.fix(vec![FixStep::noted(
-                    "measure your PoH rate before taking stake, and compare against the list",
-                    "absence from a community list is not Anza saying no; the listed parts report roughly 14M to 23M hashes per second",
-                )]),
+                Profile::Mainnet => o.fix(vec![FixStep::step("measure your PoH rate before taking stake, and compare against the list").note("absence from a community list is not Anza saying no; the listed parts report roughly 14M to 23M hashes per second")]),
                 _ => o,
             }
         }
@@ -377,10 +372,10 @@ pub fn os_support(ctx: &Ctx) -> Outcome {
             EXPECTED,
         )
         .why(WHY)
-        .fix(vec![FixStep::noted(
-            "plan a release upgrade, or move to a host on a supported release",
-            "extended maintenance may still deliver security fixes, but not new kernels",
-        )]),
+        .fix(vec![
+            FixStep::step("plan a release upgrade, or move to a host on a supported release")
+                .note("extended maintenance may still deliver security fixes, but not new kernels"),
+        ]),
     }
 }
 
@@ -450,10 +445,12 @@ pub fn cpu_governor(ctx: &Ctx) -> Outcome {
 
 /// Anza's two commands. Both are sysfs writes, so neither survives a reboot.
 fn fix_steps(ctx: &Ctx) -> Vec<FixStep> {
-    let mut v = vec![FixStep::noted(
-        "echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor",
-        "takes effect immediately, and does not restart or interrupt the validator",
-    )];
+    let mut v = vec![
+        FixStep::cmd(
+            "echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor",
+        )
+        .note("takes effect immediately, and does not restart or interrupt the validator"),
+    ];
     // Only printed when preflight can name the number to write.
     if let Some(khz) = ctx
         .fs
@@ -461,18 +458,20 @@ fn fix_steps(ctx: &Ctx) -> Vec<FixStep> {
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
     {
-        v.push(FixStep::noted(
-            format!("echo {khz} | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_min_freq"),
-            format!(
+        v.push(
+            FixStep::cmd(format!(
+                "echo {khz} | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_min_freq"
+            ))
+            .note(format!(
                 "Anza's second step, forcing the floor to the {:.0} MHz ceiling so no core idles \
                  below its base clock",
                 khz as f64 / 1000.0
-            ),
-        ));
+            )),
+        );
     }
-    v.push(FixStep::noted(
-        "then run both from a systemd oneshot unit so they survive a reboot",
-        "a sysfs write does not persist, and cpufrequtils is legacy",
-    ));
+    v.push(
+        FixStep::step("then run both from a systemd oneshot unit so they survive a reboot")
+            .note("a sysfs write does not persist, and cpufrequtils is legacy"),
+    );
     v
 }

@@ -2783,16 +2783,72 @@ fn capabilities_the_unit_asks_for_that_never_arrive() {
         "agave-validator@4.3.0",
         "--profile",
         "testnet",
+        "-v",
     ]);
+    // Nothing here uses CAP_BPF or CAP_PERFMON, so the node is no worse off.
+    // A ceiling worth knowing about, not a fault.
     let block = block_for(&o, "PF-XDP-0002");
-    assert!(block.contains("FAIL"), "{block}");
+    assert!(block.contains("PASS"), "{block}");
     assert!(
         flat(block).contains("asks for 4 capabilities, the process holds 2"),
         "count both sides:\n{block}"
     );
     assert!(
-        flat(block).contains("CAP_BPF and CAP_PERFMON never reached it"),
-        "name which ones:\n{block}"
+        flat(block).contains("nothing here uses them"),
+        "say why it is not a fault:\n{block}"
+    );
+}
+
+/// The same gap on a configuration that needs the capability. Zero copy uses
+/// CAP_BPF, so a unit that asks for it and does not get it is broken.
+#[test]
+fn a_capability_this_configuration_needs_is_a_failure() {
+    let zero_copy = Host {
+        name: "caps-dropped-with-zero-copy",
+        files: &[
+            (
+                "/etc/systemd/system/sol.service",
+                "[Service]\nUser=sol\n\
+                 CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN CAP_BPF CAP_PERFMON\n\
+                 ExecStart=/home/sol/bin/validator.sh\n",
+            ),
+            (
+                "/home/sol/bin/validator.sh",
+                "#!/usr/bin/env bash\nexec agave-validator \\\n\
+                 --identity /home/sol/validator-keypair.json \\\n\
+                 --vote-account /home/sol/vote-account-keypair.json \\\n\
+                 --entrypoint entrypoint.testnet.solana.com:8001 \\\n\
+                 --ledger /mnt/ledger \\\n\
+                 --accounts /mnt/accounts \\\n\
+                 --xdp-zero-copy \\\n\
+                 --dynamic-port-range 8000-8030\n",
+            ),
+            (
+                "/proc/4242/cmdline",
+                "agave-validator\0--ledger\0/mnt/ledger\0--xdp-zero-copy\0",
+            ),
+            (
+                "/proc/4242/status",
+                "Name:\tagave-validator\nUid:\t1001\t1001\t1001\t1001\n\
+                 CapPrm:\t0000000000000000\nCapBnd:\t0000000000003000\n",
+            ),
+            ("/proc/4242/cgroup", "0::/system.slice/sol.service\n"),
+        ],
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let (o, _) = run(&[
+        "--root",
+        &host(&zero_copy),
+        "--client",
+        "agave-validator@4.3.0",
+        "--profile",
+        "testnet",
+    ]);
+    let block = block_for(&o, "PF-XDP-0002");
+    assert!(block.contains("FAIL"), "{block}");
+    assert!(
+        flat(block).contains("this configuration needs it"),
+        "say that it is actually needed here:\n{block}"
     );
 }
 

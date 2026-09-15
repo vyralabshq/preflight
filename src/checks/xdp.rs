@@ -415,8 +415,10 @@ pub fn unit_capabilities_took_effect(ctx: &Ctx) -> Outcome {
         granted. CAP_BPF and CAP_PERFMON arrived in Linux 5.8 and systemd learned the names in \
         246, so on a distribution shipping 245 a unit asking for them silently gets a subset. \
         Nothing reports the difference: systemctl shows what systemd parsed, not what the file \
-        asked for, and the process shows what it was given.";
-    const EXPECTED: &str = "every capability the unit names present in the process";
+        asked for, and the process shows what it was given. What that costs depends on whether \
+        this configuration needs the capability: one it never asks for is a ceiling rather than a \
+        fault, and the node is no worse off today.";
+    const EXPECTED: &str = "every capability this configuration needs present in the process";
 
     if let Some(o) = needs_linux(ctx, WHY) {
         return o;
@@ -460,8 +462,35 @@ pub fn unit_capabilities_took_effect(ctx: &Ctx) -> Outcome {
     if missing.is_empty() {
         return Outcome::pass(format!("{observed}, all of them"), EXPECTED).why(WHY);
     }
+
+    // A capability this configuration never uses is a ceiling, not a fault.
+    // Failing on it would call a node broken that nothing is wrong with.
+    let needed = xdp_state(ctx).map(|s| s.required).unwrap_or_default();
+    let blocking: Vec<&String> = missing
+        .iter()
+        .filter(|m| needed.iter().any(|n| n.eq_ignore_ascii_case(m)))
+        .collect();
+    // A capability nothing here uses costs nothing, and PF-KRN-0005 already
+    // reports whether zero copy is available. Saying it again is noise.
+    if blocking.is_empty() {
+        return Outcome::pass(
+            format!(
+                "{observed}; {} did not, and nothing here uses them",
+                missing.join(" and ")
+            ),
+            EXPECTED,
+        )
+        .why(WHY);
+    }
     Outcome::fail(
-        format!("{observed}; {} never reached it", missing.join(" and ")),
+        format!(
+            "{observed}; {} never reached it, and this configuration needs it",
+            blocking
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(" and ")
+        ),
         EXPECTED,
     )
     .why(WHY)

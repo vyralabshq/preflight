@@ -7,42 +7,45 @@ Built and maintained by [vyralabshq](https://github.com/vyralabshq).
 
 ## What it does
 
-It answers two questions, in this order, because a machine that cannot run a
-validator makes every question about a validator's configuration beside the
-point.
+Two questions, in this order, because a machine that cannot run a validator
+makes every question about its configuration beside the point.
 
 **Can this machine run a validator?** Works on a bare box with nothing
 installed. CPU, memory, disks, filesystems, free space, and the kernel values
 agave refuses to start without.
 
 **Is the validator configured correctly?** Needs one installed. Whether the
-command line survived the last upgrade, and whether the Linux capabilities the
-XDP transmit path needs actually reached the process.
+command line survived the last upgrade, whether the systemd unit depends on the
+disks it writes to, and whether the Linux capabilities the XDP transmit path
+needs actually reached the process.
 
-36 checks: 7 hardware, 5 kernel, 7 filesystem, 1 network card, 14 command line,
-2 XDP capability. Process limits, systemd and security are not built. Firedancer
-is detected and skipped rather than checked.
+40 checks: 8 hardware, 5 kernel, 6 filesystem, 3 network card, 14 command line,
+1 systemd unit, 3 XDP capability. Process limits and security are not built.
+Firedancer is detected and skipped rather than checked.
+
+Four only ever report a number, because nobody publishes a figure to judge it
+against: core count, memory, whether your CPU is one somebody has measured, and
+storage headroom.
+
+It does not tell you whether the node is keeping up. Every check reads
+configuration; skip rate and replay timing need the cluster, and preflight makes
+no network calls.
 
 ## How it helps
 
-Validator problems do not announce themselves. A sysctl below agave's floor stops
-the node from starting, but only after a snapshot download. A renamed flag still
-parses, so nothing looks wrong until the setting it controlled quietly stops
-applying. A capability granted in the wrong systemd directive leaves the permitted
-set empty and the node runs without the thing you set up.
+Validator problems do not announce themselves. A renamed flag still parses, so
+nothing looks wrong until the setting it controlled quietly stops applying. A
+power saving CPU governor holds your cores below their own base clock while every
+tool on the box reports the machine healthy.
 
-preflight finds those before they cost you an outage, and cites where each
-requirement comes from so you can check the claim rather than trust it.
-
-It never writes to your system, never uses sudo, and runs exactly one command:
-`<your validator> --version`, unprivileged and printed in every report.
-`--no-exec` disables even that. When it cannot read something it says `UNKNOWN`
-and why, rather than guessing.
+It never writes to your system, never uses sudo, and runs one command:
+`<your validator> --version`, printed in every report. `--no-exec` disables even
+that. When it cannot read something it says `UNKNOWN` and why.
 
 ## What you see
 
 Every finding has the same shape: what is there, what should be, why it matters,
-what to run, how to confirm it worked, and where the requirement comes from.
+what to run, how to confirm it, and where the requirement comes from.
 
 ```
   PF-KRN-0001  net.core.rmem_max                                 FAIL  fatal
@@ -113,26 +116,20 @@ lives, and what the machine is.
 | 3 | internal error |
 | 4 | an `UNKNOWN`: the run was incomplete, not clean |
 
-`EPHEMERAL` catches a setting that works today and vanishes on the next reboot.
-`UNSUPPORTED` is an honest no, printed without a fix because none exists. Code 4
-exists so an incomplete run cannot be mistaken for a clean one.
-
 ## Every check is cited
 
-Each names where its requirement comes from, an agave symbol or a section of a
-named release's changelog, plus the version it was last verified against. Where
-no source publishes a figure, the check says so and reports the number instead
-of inventing a threshold. `preflight --dump-registry` prints the full list, and
-[`docs/registry.md`](docs/registry.md) is that list committed, so a change to any
-check's source or severity shows up as a diff.
+Each names its source: an agave symbol, a section of a named changelog, or the
+doc page, plus the version it was verified against. Where nobody publishes a
+figure the check says so rather than inventing a threshold.
+`preflight --dump-registry` prints the list; [`docs/registry.md`](docs/registry.md)
+is it committed, so a change to any source or severity shows up as a diff.
 
 ## Status
 
 Early. Checks run against fixtures in CI and against a live testnet validator.
-Checks needing an elevated read print the command instead of running it; the
-allowlist is [`src/privilege.rs`](src/privilege.rs). `scripts/pf-dump.sh`
-captures a host snapshot for fixtures, redacting metrics credentials and never
-reading keypairs.
+A check needing an elevated read prints the command rather than running it.
+`scripts/pf-dump.sh` captures a host snapshot for fixtures, redacting metrics
+credentials and never reading keypairs.
 
 ## Licence
 

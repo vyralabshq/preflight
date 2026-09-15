@@ -689,9 +689,10 @@ fn summary(ctx: &Ctx, findings: &[Finding], st: &Style) -> String {
         ));
         if unmet + advisory > 0 {
             line.push_str(&st.dim(&format!(
-                "          the other {} {} not stop it, but leave the node short\n",
+                "          the other {} {} not stop it, but {} the node short\n",
                 unmet + advisory,
-                plural(unmet + advisory, "does", "do")
+                plural(unmet + advisory, "does", "do"),
+                plural(unmet + advisory, "leaves", "leave")
             )));
         }
     } else if unmet > 0 {

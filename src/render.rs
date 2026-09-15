@@ -231,8 +231,17 @@ fn system_report(ctx: &Ctx, st: &Style, needs_root: usize) -> String {
     {
         row!("", st.dim(&format!("version read by running: {cmd}")));
     }
-    if let Some(t) = ctx.inv().and_then(|i| i.edit_target.clone()) {
-        row!("config", t);
+    // Where the configuration is, not where a change goes: the fix file can
+    // be a drop-in that does not exist yet.
+    if let Some(inv) = ctx.inv() {
+        let source = inv
+            .fix_file
+            .clone()
+            .filter(|t| ctx.fs.exists(t))
+            .or_else(|| inv.unit_path.clone());
+        if let Some(t) = source {
+            row!("config", t);
+        }
     }
     if ctx
         .version

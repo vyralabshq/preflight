@@ -292,7 +292,7 @@ fn require_version(ctx: &Ctx, major: u64, minor: u64) -> Result<(), Box<Outcome>
 
 /// Open the file that holds the command line, apply the change, restart the unit.
 fn edit_steps(ctx: &Ctx, changes: Vec<FixStep>) -> Vec<FixStep> {
-    let mut steps = vec![match ctx.inv().and_then(|i| i.edit_target.clone()) {
+    let mut steps = vec![match ctx.inv().and_then(|i| i.fix_file.clone()) {
         Some(f) => FixStep::cmd(format!("edit {f}")),
         None => FixStep::noted(
             "edit your validator command line",
@@ -309,9 +309,9 @@ fn edit_steps(ctx: &Ctx, changes: Vec<FixStep>) -> Vec<FixStep> {
     steps
 }
 
-fn edit_target_or(ctx: &Ctx) -> String {
+fn fix_file_or(ctx: &Ctx) -> String {
     ctx.inv()
-        .and_then(|i| i.edit_target.clone())
+        .and_then(|i| i.fix_file.clone())
         .unwrap_or_else(|| "<your validator command line>".to_string())
 }
 
@@ -414,10 +414,7 @@ pub fn port_range(ctx: &Ctx) -> Outcome {
             "30 leaves headroom above the 26 required",
         )],
     ))
-    .verify(format!(
-        "grep -- --dynamic-port-range {}",
-        edit_target_or(ctx)
-    ))
+    .verify(format!("grep -- --dynamic-port-range {}", fix_file_or(ctx)))
 }
 
 /// PF-ARG-0002. The check that catches a fresh Lima VM, which is exactly the
@@ -466,7 +463,7 @@ pub fn removed_in_40(ctx: &Ctx) -> Outcome {
     deprecated(ctx, removed.clone(), EXPECTED, WHY, changes).verify(format!(
         "grep -c -- {} {}   # expect 0",
         removed.first().map(String::as_str).unwrap_or("--cuda"),
-        edit_target_or(ctx)
+        fix_file_or(ctx)
     ))
 }
 

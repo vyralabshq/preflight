@@ -171,6 +171,14 @@ pub const STALE_BLOG_INVOCATION: &str = "exec agave-validator \\\n\
      --experimental-poh-pinned-cpu-core 10 \\\n\
      --allow-private-addr\n";
 
+/// Scratch space under target/, so cargo clean removes it and two checkouts
+/// do not share a path.
+fn scratch(name: &str) -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
 fn write(root: &Path, path: &str, body: &str) {
     let full = root.join(path.trim_start_matches('/'));
     fs::create_dir_all(full.parent().unwrap()).unwrap();
@@ -475,7 +483,7 @@ fn provisional_checks_cannot_reach_a_released_client() {
 fn port_range_false_pass_at_the_boundary_is_impossible() {
     // 11000-11025 is 25 under agave's half-open arithmetic. An implementation
     // using end - start + 1 would call it 26 and pass.
-    let dir = std::env::temp_dir().join("pf-boundary");
+    let dir = scratch("pf-boundary");
     std::fs::create_dir_all(&dir).unwrap();
     let f = dir.join("cmdline.txt");
     std::fs::write(
@@ -719,7 +727,7 @@ fn unreadable_validator_is_still_unknown() {
 }
 
 fn fake_validator(version: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("pf-fake-{}", version.replace('.', "_")));
+    let dir = scratch(&format!("pf-fake-{}", version.replace('.', "_")));
     std::fs::create_dir_all(&dir).unwrap();
     let bin = dir.join("agave-validator");
     std::fs::write(
@@ -906,7 +914,7 @@ fn a_bare_box_is_told_its_storage_is_too_small() {
 
 #[test]
 fn shared_spinning_zfs_storage_is_caught_on_every_axis() {
-    let inv = std::env::temp_dir().join("pf-shared.txt");
+    let inv = scratch("shared").join("pf-shared.txt");
     std::fs::write(
         &inv,
         "exec agave-validator --ledger /mnt/shared/ledger --accounts /mnt/shared/accounts\n",
@@ -2961,5 +2969,222 @@ fn a_unit_that_does_not_depend_on_its_mounts_is_a_finding() {
         block_for(&o, "PF-SVC-0001").contains("PASS"),
         "a parent path covers what is under it:\n{}",
         block_for(&o, "PF-SVC-0001")
+    );
+}
+
+/// A packaged unit in /usr/lib with the operator's override in /etc. Reading
+/// only the directory beside the unit missed every override.
+#[test]
+fn a_packaged_unit_is_read_with_its_etc_drop_in() {
+    let packaged = Host {
+        name: "packaged-unit",
+        files: &[
+            (
+                "/usr/lib/systemd/system/sol.service",
+                "[Service]\nUser=sol\nExecStart=/home/sol/bin/validator.sh\n",
+            ),
+            // systemctl edit writes here, never next to the packaged unit.
+            (
+                "/etc/systemd/system/sol.service.d/override.conf",
+                "[Service]\n\
+                 AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN\n\
+                 CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN\n",
+            ),
+            (
+                "/home/sol/bin/validator.sh",
+                "#!/usr/bin/env bash\nexec agave-validator \\\n\
+                 --identity /home/sol/validator-keypair.json \\\n\
+                 --vote-account /home/sol/vote-account-keypair.json \\\n\
+                 --entrypoint entrypoint.testnet.solana.com:8001 \\\n\
+                 --ledger /mnt/ledger \\\n\
+                 --accounts /mnt/accounts \\\n\
+                 --dynamic-port-range 8000-8030\n",
+            ),
+        ],
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let (o, _) = run(&[
+        "--root",
+        &host(&packaged),
+        "--client",
+        "agave-validator@4.3.0",
+        "--profile",
+        "testnet",
+        "-v",
+    ]);
+    // The grant is in the /etc drop-in.
+    let caps = block_for(&o, "PF-XDP-0001");
+    assert!(
+        !caps.contains("FAIL"),
+        "the drop-in grants these; reading only /usr/lib misses it:\n{caps}"
+    );
+
+    // And never send anyone to edit a packaged file.
+    assert!(
+        !flat(&o).contains("edit /usr/lib/systemd/system/sol.service"),
+        "never send anyone to edit a file the package manager owns:\n{o}"
+    );
+}
+
+/// An admin copy in /etc outranks a packaged one of the same name.
+#[test]
+fn an_etc_unit_outranks_a_packaged_one() {
+    let both = Host {
+        name: "unit-in-two-places",
+        files: &[
+            (
+                "/usr/lib/systemd/system/sol.service",
+                "[Service]\nUser=nobody\nExecStart=/usr/bin/agave-validator --ledger /wrong\n",
+            ),
+            (
+                "/etc/systemd/system/sol.service",
+                "[Service]\nUser=sol\nExecStart=/home/sol/bin/validator.sh\n",
+            ),
+            (
+                "/home/sol/bin/validator.sh",
+                "#!/usr/bin/env bash\nexec agave-validator \\\n\
+                 --identity /home/sol/validator-keypair.json \\\n\
+                 --vote-account /home/sol/vote-account-keypair.json \\\n\
+                 --entrypoint entrypoint.testnet.solana.com:8001 \\\n\
+                 --ledger /mnt/ledger \\\n\
+                 --accounts /mnt/accounts \\\n\
+                 --dynamic-port-range 8000-8030\n",
+            ),
+        ],
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let (o, _) = run(&[
+        "--root",
+        &host(&both),
+        "--client",
+        "agave-validator@4.3.0",
+        "--profile",
+        "testnet",
+    ]);
+    assert!(
+        !flat(&o).contains("/wrong"),
+        "the packaged unit must not win over the administrator's:\n{o}"
+    );
+}
+
+/// A packaged unit is not the operator's to edit, so the fix file is a
+/// drop-in under /etc, and it has to read as a path where it is printed.
+#[test]
+fn a_packaged_unit_sends_you_to_a_drop_in() {
+    let packaged = Host {
+        name: "packaged-direct-execstart",
+        files: &[(
+            "/usr/lib/systemd/system/sol.service",
+            "[Service]\nUser=sol\n\
+             ExecStart=/home/sol/.local/share/solana/install/active_release/bin/agave-validator \
+             --identity /home/sol/id.json --vote-account /home/sol/vote.json \
+             --entrypoint entrypoint.testnet.solana.com:8001 --ledger /mnt/ledger \
+             --accounts /mnt/accounts --dynamic-port-range 8000-8020\n",
+        )],
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let (o, _) = run(&[
+        "--root",
+        &host(&packaged),
+        "--client",
+        "agave-validator@4.3.0",
+        "--profile",
+        "testnet",
+    ]);
+    assert!(
+        flat(&o).contains("edit /etc/systemd/system/sol.service.d/10-preflight.conf"),
+        "a drop-in under /etc, and it must read as a path:\n{o}"
+    );
+    assert!(
+        !flat(&o).contains("edit sudo"),
+        "the fix file is printed after the word edit, so it cannot be a command:\n{o}"
+    );
+    assert!(
+        !flat(&o).contains("edit /usr/lib"),
+        "never the packaged file:\n{o}"
+    );
+}
+
+/// A stopped validator is the whole point of the machine question, and the
+/// unit is the only way to find its configuration then. Matching on the word
+/// "validator" in the unit missed a wrapper script named for the cluster.
+#[test]
+fn a_unit_is_found_by_following_execstart_not_by_its_wording() {
+    let no_keyword = Host {
+        name: "unit-without-the-word",
+        files: &[
+            (
+                "/etc/systemd/system/sol.service",
+                "[Unit]\nDescription=Vyra Solana Testnet Validator\n\n\
+                 [Service]\nType=simple\nUser=sol\n\
+                 ExecStart=/home/sol/start-testnet-agave.sh\nRestart=always\n",
+            ),
+            (
+                "/home/sol/start-testnet-agave.sh",
+                "#!/bin/bash\nexec agave-validator \\\n\
+                 --identity /home/sol/keys/identity.json \\\n\
+                 --vote-account /home/sol/keys/vote-account.json \\\n\
+                 --entrypoint entrypoint.testnet.solana.com:8001 \\\n\
+                 --ledger /mnt/ledger \\\n\
+                 --accounts /mnt/accounts \\\n\
+                 --dynamic-port-range 8000-8030\n",
+            ),
+        ],
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let (o, _) = run(&[
+        "--root",
+        &host(&no_keyword),
+        "--client",
+        "agave-validator@4.3.0",
+        "--profile",
+        "testnet",
+    ]);
+    // Capital V in Description, no "validator" in the script name, no binary
+    // name anywhere in the unit.
+    assert!(
+        o.contains("config      /home/sol/start-testnet-agave.sh"),
+        "the unit has to be found by reading ExecStart:\n{o}"
+    );
+    assert!(
+        !flat(&o).contains("no validator invocation could be resolved"),
+        "{o}"
+    );
+}
+
+/// A unit installed by hand into /usr/local/lib was never searched at all.
+#[test]
+fn a_unit_in_usr_local_lib_is_found() {
+    let local = Host {
+        name: "unit-in-usr-local",
+        files: &[
+            (
+                "/usr/local/lib/systemd/system/sol.service",
+                "[Service]\nUser=sol\nExecStart=/home/sol/bin/validator.sh\n",
+            ),
+            (
+                "/home/sol/bin/validator.sh",
+                "#!/usr/bin/env bash\nexec agave-validator \\\n\
+                 --identity /home/sol/validator-keypair.json \\\n\
+                 --vote-account /home/sol/vote-account-keypair.json \\\n\
+                 --entrypoint entrypoint.testnet.solana.com:8001 \\\n\
+                 --ledger /mnt/ledger \\\n\
+                 --accounts /mnt/accounts \\\n\
+                 --dynamic-port-range 8000-8030\n",
+            ),
+        ],
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let (o, _) = run(&[
+        "--root",
+        &host(&local),
+        "--client",
+        "agave-validator@4.3.0",
+        "--profile",
+        "testnet",
+    ]);
+    assert!(
+        !flat(&o).contains("no validator invocation could be resolved"),
+        "/usr/local/lib is in systemd's load path:\n{o}"
     );
 }

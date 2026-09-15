@@ -382,7 +382,8 @@ mod tests {
     /// withheld rather than undercounted, captured trees out of scope.
     #[test]
     fn directory_sizes_are_measured_not_delegated() {
-        let dir = std::env::temp_dir().join("preflight-dirsize-test");
+        // Under target/ so cargo clean removes it and checkouts do not collide.
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-scratch/dirsize");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("nested")).unwrap();
         std::fs::write(dir.join("a"), vec![0u8; 2_000_000]).unwrap();

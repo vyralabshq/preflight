@@ -39,8 +39,9 @@ impl Origin {
 pub struct Invocation {
     pub origin: Origin,
     pub pid: Option<String>,
-    /// The file an operator actually edits to change this command line.
-    pub edit_target: Option<String>,
+    /// The file a fix should change. preflight never writes it, only names it.
+    /// Often a wrapper script rather than the unit.
+    pub fix_file: Option<String>,
     pub unit_path: Option<String>,
     pub unit_name: Option<String>,
     pub program: String,
@@ -180,7 +181,7 @@ fn build(
     Some(Invocation {
         origin,
         pid: None,
-        edit_target: None,
+        fix_file: None,
         unit_path: None,
         unit_name: None,
         program,
@@ -245,42 +246,34 @@ fn unit_of_pid(fs: &Rootfs, pid: &str) -> Option<String> {
 /// running. The scan only accepts a unit whose ExecStart actually reaches a
 /// validator binary, directly or through a wrapper script.
 fn unit_details(fs: &Rootfs, name: &str) -> Option<(String, String, String)> {
-    let path = unit_files(fs)
-        .into_iter()
-        .find(|p| p.file_name().is_some_and(|f| f == name))?;
-    let text = std::fs::read_to_string(&path).ok()?;
+    let u = unit_files(fs).into_iter().find(|u| u.name == name)?;
+    let text = std::fs::read_to_string(&u.on_disk).ok()?;
     let (exec, _) = parse_unit(&text)?;
-    let abs = format!("/etc/systemd/system/{name}");
     let first = split_words(&exec).first().cloned().unwrap_or_default();
     let edit = match is_validator_bin(&first) {
-        true => abs.clone(),
+        true => fix_file_for(&u),
         false => first,
     };
-    Some((abs, name.to_string(), edit))
+    Some((u.logical, name.to_string(), edit))
 }
 
 fn owning_unit(fs: &Rootfs) -> Option<(String, String, String)> {
-    for unit in unit_files(fs) {
-        let Ok(text) = std::fs::read_to_string(&unit) else {
+    for u in unit_files(fs) {
+        let Ok(text) = std::fs::read_to_string(&u.on_disk) else {
             continue;
         };
         if !launches_a_validator(fs, &text) {
             continue;
         }
-        let Some(name) = unit.file_name().map(|n| n.to_string_lossy().to_string()) else {
-            continue;
-        };
-        let abs = format!("/etc/systemd/system/{name}");
         let Some((exec, _)) = parse_unit(&text) else {
             continue;
         };
         let first = split_words(&exec).first().cloned().unwrap_or_default();
-        let edit = if is_validator_bin(&first) {
-            abs.clone()
-        } else {
-            first
+        let edit = match is_validator_bin(&first) {
+            true => fix_file_for(&u),
+            false => first,
         };
-        return Some((abs, name, edit));
+        return Some((u.logical.clone(), u.name.clone(), edit));
     }
     None
 }
@@ -304,12 +297,60 @@ fn launches_a_validator(fs: &Rootfs, text: &str) -> bool {
         .is_some()
 }
 
-fn unit_files(fs: &Rootfs) -> Vec<std::path::PathBuf> {
-    let mut v = fs.list("/etc/systemd/system");
-    v.extend(fs.list("/lib/systemd/system"));
-    v.extend(fs.list("/usr/lib/systemd/system"));
-    v.retain(|p| p.extension().is_some_and(|e| e == "service"));
+/// systemd's unit load path, highest precedence first, from systemd.unit(5).
+/// /lib is a symlink to /usr/lib on merged-usr, so it is deduped, not skipped.
+pub const UNIT_DIRS: &[&str] = &[
+    "/etc/systemd/system.control",
+    "/run/systemd/system.control",
+    "/run/systemd/transient",
+    "/run/systemd/generator.early",
+    "/etc/systemd/system",
+    "/run/systemd/system",
+    "/run/systemd/generator",
+    "/usr/local/lib/systemd/system",
+    "/usr/lib/systemd/system",
+    "/lib/systemd/system",
+    "/run/systemd/generator.late",
+];
+
+/// Every unit systemd would load. First match by name wins, so an admin
+/// unit in /etc shadows a packaged one.
+fn unit_files(fs: &Rootfs) -> Vec<UnitFile> {
+    let mut v = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for dir in UNIT_DIRS {
+        for on_disk in fs.list(dir) {
+            let Some(name) = on_disk.file_name().map(|n| n.to_string_lossy().to_string()) else {
+                continue;
+            };
+            if on_disk.extension().is_some_and(|e| e == "service") && seen.insert(name.clone()) {
+                v.push(UnitFile {
+                    logical: format!("{dir}/{name}"),
+                    on_disk,
+                    name,
+                });
+            }
+        }
+    }
     v
+}
+
+/// Two paths: `logical` is the path on the host being reported on,
+/// `on_disk` is where this process reads it. They differ under --root.
+struct UnitFile {
+    logical: String,
+    on_disk: std::path::PathBuf,
+    name: String,
+}
+
+/// Where a change goes. A unit in /etc is the operator's; anything else is
+/// the package manager's and gets overwritten, so that answer is a drop-in.
+fn fix_file_for(u: &UnitFile) -> String {
+    let name = &u.name;
+    match u.logical.starts_with("/etc/systemd/system/") {
+        true => format!("/etc/systemd/system/{name}"),
+        false => format!("/etc/systemd/system/{name}.d/10-preflight.conf"),
+    }
 }
 
 fn parse_unit(text: &str) -> Option<(String, BTreeMap<String, String>)> {
@@ -368,26 +409,27 @@ pub fn resolve(fs: &Rootfs) -> Result<Invocation, Vec<String>> {
             if let Some((path, name, edit)) = owner {
                 inv.unit_path = Some(path);
                 inv.unit_name = Some(name);
-                inv.edit_target = Some(edit);
+                inv.fix_file = Some(edit);
             }
             return Ok(inv);
         }
     }
     trail.push("no running validator process found".into());
 
-    for unit in unit_files(fs) {
-        let Ok(text) = std::fs::read_to_string(&unit) else {
+    for u in unit_files(fs) {
+        let Ok(text) = std::fs::read_to_string(&u.on_disk) else {
             continue;
         };
-        if !VALIDATOR_BINS.iter().any(|b| text.contains(b)) && !text.contains("validator") {
+        // Follow ExecStart rather than looking for the word "validator" in the
+        // unit. A wrapper script named for the cluster contains neither the
+        // word nor a binary name, and Description= is not a reliable clue.
+        if !launches_a_validator(fs, &text) {
             continue;
         }
-        let name = unit
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-        let abs = format!("/etc/systemd/system/{name}");
+        let name = u.name.clone();
+        // Where it lives. Where to change it can be a different file.
+        let abs = u.logical.clone();
+        let edit = fix_file_for(&u);
         let Some((exec, env)) = parse_unit(&text) else {
             continue;
         };
@@ -404,7 +446,7 @@ pub fn resolve(fs: &Rootfs) -> Result<Invocation, Vec<String>> {
         {
             inv.unit_path = Some(abs.clone());
             inv.unit_name = Some(name.clone());
-            inv.edit_target = Some(abs.clone());
+            inv.fix_file = Some(edit.clone());
             return Ok(inv);
         }
 
@@ -422,7 +464,7 @@ pub fn resolve(fs: &Rootfs) -> Result<Invocation, Vec<String>> {
                         {
                             inv.unit_path = Some(abs.clone());
                             inv.unit_name = Some(name.clone());
-                            inv.edit_target = Some(script.clone());
+                            inv.fix_file = Some(script.clone());
                             return Ok(inv);
                         }
                     }

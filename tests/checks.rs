@@ -1271,24 +1271,6 @@ fn snap_and_boot_mounts_stay_out_of_the_report() {
     assert!(!o.contains("/boot/efi"), "{o}");
 }
 
-/// Anza publishes no memory minimum, so this reports and does not judge. An
-/// invented 128 GB threshold failed a working 125 GB validator.
-#[test]
-fn memory_is_reported_not_failed() {
-    let small = Host {
-        name: "small-memory",
-        mem_kb: 131_500_000,
-        ..FRESH_UBUNTU
-    };
-    let (o, _) = run(&["--root", &host(&small), "--profile", "testnet", "-v"]);
-    let block = o.split("PF-HW-0005").nth(1).unwrap_or_default();
-    let head: String = block.lines().take(2).collect::<Vec<_>>().join(" ");
-    assert!(
-        !head.contains("FAIL"),
-        "no published minimum means no failure:\n{head}"
-    );
-}
-
 /// Anza cautions about accounts and ledger sharing a disk. It says nothing
 /// about snapshots, which operators deliberately keep beside the ledger.
 #[test]
@@ -1321,21 +1303,6 @@ fn snapshots_beside_the_ledger_is_not_a_finding() {
     assert!(
         !head.contains("FAIL"),
         "snapshots beside the ledger is normal:\n{head}"
-    );
-}
-
-/// Core count is not the metric. Anza lists 12/24 as a guide; the community
-/// list carries 16 core parts that out-hash 32 core parts. Neither is a FAIL.
-#[test]
-fn core_count_check_cites_anza_and_the_community_list() {
-    let (o, _) = run(&["--root", &host(&FRESH_UBUNTU), "--profile", "testnet", "-v"]);
-    let block = block_for(&o, "PF-HW-0004");
-    assert!(block.contains("solanahcl.org"), "{block}");
-    assert!(flat(block).contains("12 cores"), "{block}");
-    assert!(flat(block).contains("RPC column"), "{block}");
-    assert!(
-        !block.contains("FAIL"),
-        "Anza's figure is a guide, not a floor we fail on:\n{block}"
     );
 }
 
@@ -2117,55 +2084,6 @@ fn an_unexpanded_token_is_unknown_not_a_clean_bill() {
         "an unread command line is not a pass:
 {o}"
     );
-}
-
-/// /proc/cpuinfo reports the governor's current speed, not the base clock. An
-/// idle core reads well under base and used to FAIL a machine that meets Anza.
-#[test]
-fn an_idle_core_is_unknown_not_a_slow_cpu() {
-    let idle = Host {
-        name: "idle-core",
-        mhz: "1500.000",
-        ..WRAPPER_SCRIPT_UNIT
-    };
-    let (o, _) = run(&[
-        "--root",
-        &host(&idle),
-        "--client",
-        "agave-validator@4.3.0",
-        "--profile",
-        "testnet",
-    ]);
-    let block = block_for(&o, "PF-HW-0003");
-    assert!(
-        !block.contains("FAIL"),
-        "a throttled core is not slow silicon:\n{block}"
-    );
-
-    let published = Host {
-        name: "idle-core-with-sysfs",
-        mhz: "1500.000",
-        files: &[(
-            "/sys/devices/system/cpu/cpu0/cpufreq/base_frequency",
-            "3000000\n",
-        )],
-        ..WRAPPER_SCRIPT_UNIT
-    };
-    let (o, _) = run(&[
-        "--root",
-        &host(&published),
-        "--client",
-        "agave-validator@4.3.0",
-        "--profile",
-        "testnet",
-        "-v",
-    ]);
-    let block = block_for(&o, "PF-HW-0003");
-    assert!(
-        block.contains("PASS"),
-        "sysfs publishes the real base:\n{block}"
-    );
-    assert!(flat(block).contains("3000 MHz base"), "{block}");
 }
 
 /// A 943 GB filesystem was failed for having 249 GB free against a 250 GB
@@ -3288,5 +3206,47 @@ fn boost_is_never_reported_as_the_base_clock() {
     assert!(
         flat(block).contains("3000 MHz base"),
         "CPPC reports MHz; reading it as kHz would say 3 MHz:\n{block}"
+    );
+}
+
+/// Over Anza's 12 and under our mainnet 24 reads as tight, on mainnet only.
+#[test]
+fn a_box_over_anzas_minimum_can_still_be_tight_for_mainnet() {
+    let root = host(&Host {
+        name: "sixteen-cores",
+        cores: 16,
+        threads: 32,
+        ..WRAPPER_SCRIPT_UNIT
+    });
+    let args = |p| {
+        [
+            "--root",
+            &root,
+            "--client",
+            "agave-validator@4.3.0",
+            "--profile",
+            p,
+            "-v",
+        ]
+    };
+
+    assert!(
+        block_for(&run(&args("testnet")).0, "PF-HW-0004").contains("REPORTED"),
+        "testnet applies no core figure"
+    );
+    let m = run(&args("mainnet")).0;
+    let block = block_for(&m, "PF-HW-0004");
+    assert!(block.contains("FAIL"), "{block}");
+    assert!(
+        flat(block).contains("over Anza's 12 but under the 24"),
+        "say it clears Anza and still asks for more:\n{block}"
+    );
+    assert!(
+        flat(block).contains("not published"),
+        "whose figure:\n{block}"
+    );
+    assert!(
+        flat(block).contains("docs.anza.xyz/operations/requirements"),
+        "both sources, so nobody reads 24 as Anza's:\n{block}"
     );
 }

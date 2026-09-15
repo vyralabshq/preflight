@@ -3,7 +3,7 @@
 | `PF-HW-0001` | HW | fatal | testnet mainnet | agave-validator solana-test-validator firedancer unknown | CPU architecture is x86-64 | docs.anza.xyz/operations/requirements | 2026-08 |
 | `PF-HW-0002` | HW | fatal | testnet mainnet | agave-validator solana-test-validator firedancer unknown | CPU supports AVX2 | docs.anza.xyz/operations/requirements | 2026-08 |
 | `PF-HW-0003` | HW | slows the node | testnet mainnet | agave-validator solana-test-validator firedancer unknown | CPU base clock is 2.8 GHz or faster | docs.anza.xyz/operations/requirements | 2026-08 |
-| `PF-HW-0004` | HW | advisory | testnet mainnet | agave-validator solana-test-validator firedancer unknown | CPU core and thread count | docs.anza.xyz/operations/requirements<br>solanahcl.org, agave CPU list | 2026-08<br>2026-08 |
+| `PF-HW-0004` | HW | slows the node | testnet mainnet | agave-validator solana-test-validator firedancer unknown | CPU core and thread count | docs.anza.xyz/operations/requirements<br>mainnet headroom above Anza's minimum, operator figure, not published<br>solanahcl.org, agave CPU list | 2026-08<br>2026-09<br>2026-08 |
 | `PF-HW-0005` | HW | slows the node | local testnet mainnet | agave-validator solana-test-validator firedancer unknown | Installed memory | docs.anza.xyz/operations/requirements | 2026-08 |
 | `PF-HW-0006` | HW | slows the node | testnet mainnet | agave-validator solana-test-validator firedancer unknown | CPU is one somebody has reported on | solanahcl.org, agave CPU list | 2026-08 |
 | `PF-HW-0007` | HW | advisory | testnet mainnet | agave-validator solana-test-validator firedancer unknown | Operating system is still in standard support | ubuntu.com/about/release-cycle | 2026-08 |

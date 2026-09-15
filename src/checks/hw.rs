@@ -29,6 +29,12 @@ pub const S_CORES: &[Source] = &[
     },
     Source {
         kind: Operator,
+        locator: "mainnet headroom above Anza's minimum, operator figure, not published",
+        verified_against: "2026-09",
+        provisional: false,
+    },
+    Source {
+        kind: Operator,
         locator: "solanahcl.org, agave CPU list",
         verified_against: "2026-08",
         provisional: false,
@@ -187,10 +193,10 @@ pub fn cores(ctx: &Ctx) -> Outcome {
         higher clock speed is preferable over more cores. The 16 cores / 32 threads line is the \
         RPC column. Clock still dominates, and the community list shows why: a 16 core Ryzen \
         9950X reaches about 23M PoH hashes per second while a 32 core EPYC 9354P reaches 14M to \
-        16M. preflight will not fail a box against the core count: an invented floor already \
-        failed machines Anza's own table accepts, and Proof of History is a single-core chain.";
-    const EXPECTED: &str =
-        "Anza lists 12 cores / 24 threads for validators; preflight does not fail on the figure";
+        16M. So preflight does not fail a box against Anza's figure. What it does apply on \
+        mainnet is a headroom figure of its own: a published minimum is where a validator breaks, \
+        not where it runs comfortably, and a box sitting on the minimum has nothing left when the \
+        cluster gets busy. That number is an operator one and is marked as such.";
 
     if let Some(o) = needs_linux(ctx, WHY) {
         return o;
@@ -204,9 +210,29 @@ pub fn cores(ctx: &Ctx) -> Outcome {
         Some(p) => format!("{p} physical cores, {threads} threads"),
         None => format!("{threads} threads, physical core count not reported"),
     };
-    match ctx.profile {
-        Profile::Local => Outcome::pass(observed, "enough for a test validator").why(WHY),
-        _ => Outcome::reported(observed, EXPECTED).why(WHY),
+    if ctx.profile == Profile::Local {
+        return Outcome::pass(observed, "enough for a test validator").why(WHY);
+    }
+    let Some(want) = ctx.profile.thresholds().cores else {
+        return Outcome::reported(
+            observed,
+            "Anza lists 12 cores / 24 threads for validators; preflight does not fail on the figure",
+        )
+        .why(WHY);
+    };
+    let expected = format!("{want} physical cores for comfort on mainnet, over Anza's 12");
+    match physical {
+        Some(p) if p < want => Outcome::fail(
+            format!("{observed}, over Anza's 12 but under the {want} this asks for"),
+            expected,
+        )
+        .why(WHY)
+        .fix(vec![
+            FixStep::step(format!("run mainnet on a part with {want} cores, or measure your PoH rate here and decide"))
+                .note("no setting changes a core count; the listed parts report 14M to 23M hashes per second"),
+        ]),
+        Some(_) => Outcome::pass(observed, expected).why(WHY),
+        None => Outcome::reported(observed, expected).why(WHY),
     }
 }
 

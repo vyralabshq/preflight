@@ -53,7 +53,7 @@ pub static CHECKS: &[Check] = &[
     Check {
         id: "PF-HW-0004",
         layer: Layer::Hw,
-        severity: Advisory,
+        severity: Degraded,
         title: "CPU core and thread count",
         profiles: &[Testnet, Mainnet],
         clients: ANY_CLIENT,

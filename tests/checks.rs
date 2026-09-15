@@ -2138,7 +2138,7 @@ fn an_idle_core_is_unknown_not_a_slow_cpu() {
     ]);
     let block = block_for(&o, "PF-HW-0003");
     assert!(
-        block.contains("UNKNOWN"),
+        !block.contains("FAIL"),
         "a throttled core is not slow silicon:\n{block}"
     );
 
@@ -3220,5 +3220,73 @@ fn an_unplaceable_capability_is_unknown_not_missing() {
     assert!(
         flat(block).contains("cannot place CAP_WAKE_ALARM"),
         "{block}"
+    );
+}
+
+/// cpuinfo_max_freq is the boost ceiling, not the base clock, and preflight
+/// printed it as "base". A 2.4 GHz part boosting to 3.5 passed Anza's 2.8 GHz
+/// base requirement on the strength of a number that is not the base.
+#[test]
+fn boost_is_never_reported_as_the_base_clock() {
+    let boosty = Host {
+        name: "boost-not-base",
+        cpu_model: "AMD EPYC 7262 8-Core Processor",
+        files: &[(
+            // No base_frequency, no CPPC: an acpi-cpufreq box publishes neither.
+            "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq",
+            "3400000\n",
+        )],
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let (o, _) = run(&[
+        "--root",
+        &host(&boosty),
+        "--client",
+        "agave-validator@4.3.0",
+        "--profile",
+        "testnet",
+        "-v",
+    ]);
+    let block = block_for(&o, "PF-HW-0003");
+    assert!(
+        !flat(block).contains("3400 MHz base"),
+        "the ceiling is not the base:\n{block}"
+    );
+    assert!(
+        !block.contains("PASS"),
+        "a boost ceiling above the bar proves nothing about the base:\n{block}"
+    );
+
+    // CPPC publishes the real base in MHz, not kHz. Mixing the units would be
+    // the same class of wrong number.
+    let cppc = Host {
+        name: "cppc-nominal-freq",
+        cpu_model: "AMD EPYC 7313P 16-Core Processor",
+        files: &[
+            (
+                "/sys/devices/system/cpu/cpu0/acpi_cppc/nominal_freq",
+                "3000\n",
+            ),
+            (
+                "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq",
+                "3717000\n",
+            ),
+        ],
+        ..WRAPPER_SCRIPT_UNIT
+    };
+    let (o, _) = run(&[
+        "--root",
+        &host(&cppc),
+        "--client",
+        "agave-validator@4.3.0",
+        "--profile",
+        "testnet",
+        "-v",
+    ]);
+    let block = block_for(&o, "PF-HW-0003");
+    assert!(block.contains("PASS"), "{block}");
+    assert!(
+        flat(block).contains("3000 MHz base"),
+        "CPPC reports MHz; reading it as kHz would say 3 MHz:\n{block}"
     );
 }

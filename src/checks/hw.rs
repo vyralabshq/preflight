@@ -102,9 +102,11 @@ pub fn avx2(ctx: &Ctx) -> Outcome {
 pub fn base_clock(ctx: &Ctx) -> Outcome {
     const WHY: &str = "Anza's stated requirement is a 2.8 GHz base clock or faster, and the docs \
         say plainly that higher clock speed is preferable to more cores. Proof of History is a \
-        sequential hash chain, so it is bound by single-core speed rather than core count. \
-        /proc/cpuinfo reports what the governor is doing right now, not the base clock, so it \
-        reads high on a busy core and low on an idle one. Neither is the number Anza means.";
+        sequential hash chain, so it is bound by single-core speed rather than core count. The \
+        base clock is easy to get wrong: /proc/cpuinfo reports what the governor is doing right \
+        now, and cpuinfo_max_freq is the boost ceiling. The base is base_frequency from \
+        intel_pstate, or nominal_freq from CPPC, which is the frequency of the highest sustained \
+        performance level rather than the highest reachable one.";
     const EXPECTED: &str = "2.8 GHz base clock or faster";
 
     if let Some(o) = needs_linux(ctx, WHY) {
@@ -122,9 +124,6 @@ pub fn base_clock(ctx: &Ctx) -> Outcome {
     let Some(want) = ctx.profile.thresholds().base_clock_mhz else {
         return Outcome::skipped("no clock requirement for this profile");
     };
-
-    // cpufreq publishes the real thing. Fall back to the governor's current
-    // reading only to say so, never to fail a machine on it.
     let khz = |p: &str| {
         ctx.fs
             .read(p)
@@ -132,8 +131,19 @@ pub fn base_clock(ctx: &Ctx) -> Outcome {
             .and_then(|v| v.trim().parse::<f64>().ok())
             .map(|k| k / 1000.0)
     };
+
+    // Two files are genuinely the base clock, and they disagree on units:
+    // base_frequency is kHz from intel_pstate, nominal_freq is MHz from CPPC,
+    // which is what an AMD box publishes.
+    let mhz = |p: &str| {
+        ctx.fs
+            .read(p)
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|m| *m > 0.0)
+    };
     let base = khz("/sys/devices/system/cpu/cpu0/cpufreq/base_frequency")
-        .or_else(|| khz("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq"));
+        .or_else(|| mhz("/sys/devices/system/cpu/cpu0/acpi_cppc/nominal_freq"));
     if let Some(m) = base {
         let observed = format!("{model} at {m:.0} MHz base");
         return match m >= want {
@@ -145,27 +155,30 @@ pub fn base_clock(ctx: &Ctx) -> Outcome {
         };
     }
 
-    let current = info
-        .lines()
-        .find(|l| l.starts_with("cpu MHz"))
-        .and_then(|l| l.split(':').nth(1))
-        .and_then(|v| v.trim().parse::<f64>().ok());
-    match current {
-        None => Outcome::unknown(format!("{model}: no clock reported")).why(WHY),
-        // Above the bar on a governor reading still clears the bar.
-        Some(m) if m >= want => Outcome::pass(
-            format!("{model} at {m:.0} MHz current, base not published by this kernel"),
+    // Without it the base is unreadable, but one inference still holds: the
+    // base cannot exceed the maximum, so a low ceiling is a certain failure.
+    let ceiling = khz("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq");
+    if let Some(m) = ceiling
+        && m < want
+    {
+        return Outcome::fail(
+            format!("{model} tops out at {m:.0} MHz, so its base is below that"),
             EXPECTED,
         )
-        .why(WHY),
-        // Below it proves nothing: an idle core throttles well under base.
-        Some(m) => Outcome::unknown(format!(
-            "{model} at {m:.0} MHz current, which is the governor's reading and not the base clock"
-        ))
-        .expected(EXPECTED)
         .why(WHY)
-        .verify("lscpu | grep -i 'model name\\|CPU max MHz'"),
+        .fix(vec![FixStep::step("run this one on a faster part").note(
+            "no setting raises a ceiling the silicon does not have",
+        )]);
     }
+
+    // A high ceiling says nothing about the base: a 2.4 GHz part boosting to
+    // 3.5 would clear the bar here while failing the requirement.
+    let seen = ceiling
+        .map(|m| format!("{model}, boost ceiling {m:.0} MHz, base not published by this driver"))
+        .unwrap_or_else(|| format!("{model}, no clock published by this driver"));
+    Outcome::reported(seen, "base clock unreadable here; Anza asks for 2.8 GHz")
+        .why(WHY)
+        .verify("lscpu | grep -i 'model name'")
 }
 
 /// PF-HW-0004. Cores. Reported: Anza lists 12/24 as a guide, and clock dominates.

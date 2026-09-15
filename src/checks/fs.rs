@@ -9,7 +9,7 @@ use crate::{
     checks::needs_linux,
     ctx::Ctx,
     host,
-    model::{FixStep, Outcome, Source, SourceKind::*, Status},
+    model::{FixStep, Outcome, Source, SourceKind::*},
 };
 
 pub const S_REQ: &[Source] = &[Source {
@@ -35,14 +35,6 @@ pub const S_REQ_AND_OPERATOR: &[Source] = &[
     },
 ];
 
-/// noatime is common operator practice, not something Anza publishes. Citing
-/// their requirements page for it would be inventing a source.
-pub const S_OPERATOR: &[Source] = &[Source {
-    kind: Operator,
-    locator: "operator practice, not published by Anza",
-    verified_against: "2026-08",
-    provisional: false,
-}];
 pub const S_DIO: &[Source] = &[Source {
     kind: AgaveChangelog,
     locator: "v4.0 Validator/Changes",
@@ -60,7 +52,6 @@ pub struct MountInfo {
     pub target: String,
     pub source: String,
     pub fstype: String,
-    pub options: String,
 }
 
 pub fn mounts(ctx: &Ctx) -> Vec<MountInfo> {
@@ -70,11 +61,10 @@ pub fn mounts(ctx: &Ctx) -> Vec<MountInfo> {
     text.lines()
         .filter_map(|l| {
             let p: Vec<&str> = l.split_whitespace().collect();
-            (p.len() >= 4).then(|| MountInfo {
+            (p.len() >= 3).then(|| MountInfo {
                 target: p[1].to_string(),
                 source: p[0].to_string(),
                 fstype: p[2].to_string(),
-                options: p[3].to_string(),
             })
         })
         .collect()
@@ -410,66 +400,6 @@ pub fn storage_media(ctx: &Ctx) -> Outcome {
             None => Ok(format!("{label} on {}", m.source)),
         }
     })
-}
-
-/// PF-FS-0004. noatime.
-pub fn noatime(ctx: &Ctx) -> Outcome {
-    const WHY: &str = "Anza does not publish this one. It is common operator practice: without \
-        noatime the kernel writes an access timestamp every time the validator reads a file, \
-        which on an accounts database means a metadata write behind a large share of reads. It \
-        costs write endurance for information nothing uses. Worth doing, not required.";
-    const EXPECTED: &str = "noatime on the validator's filesystems";
-
-    if let Some(o) = needs_linux(ctx, WHY) {
-        return o;
-    }
-    let out = per_path(ctx, EXPECTED, WHY, |m, named| {
-        match m.options.split(',').any(|o| o == "noatime") {
-            true => Ok(named.to_string()),
-            // The mount carries the option, not the path, so name both.
-            false => Err(format!("{named}, mounted at {}, has no noatime", m.target)),
-        }
-    });
-    if out.status != Status::Fail {
-        return out;
-    }
-    // A finding with nothing to do about it is half a finding, and the target
-    // is the mount rather than the path the validator was given.
-    let targets: Vec<String> = {
-        let all = mounts(ctx);
-        let mut t: Vec<String> = validator_paths(ctx)
-            .iter()
-            .filter_map(|(_, p)| mount_for(&all, p))
-            .filter(|m| !m.options.split(',').any(|o| o == "noatime"))
-            .map(|m| m.target.clone())
-            .collect();
-        t.sort();
-        t.dedup();
-        t
-    };
-    let root = targets.iter().any(|t| t == "/");
-    let mut fix = vec![FixStep::noted(
-        format!(
-            "add noatime to the {} entry in /etc/fstab",
-            targets.join(" and ")
-        ),
-        "fstab is what survives a reboot, so it is the edit that counts",
-    )];
-    fix.push(match root {
-        true => FixStep::noted(
-            format!("sudo mount -o remount,noatime {}", targets.join(" ")),
-            "remounting the root filesystem is live and does not need a reboot, but do it when \
-             you can watch the node rather than during a restart",
-        ),
-        false => FixStep::cmd(format!(
-            "sudo mount -o remount,noatime {}",
-            targets.join(" ")
-        )),
-    });
-    out.fix(fix).verify(format!(
-        "findmnt -no OPTIONS {}",
-        targets.first().cloned().unwrap_or_else(|| "/".into())
-    ))
 }
 
 /// PF-FS-0005. Filesystem type.

@@ -16,7 +16,6 @@
 | `PF-FS-0001` | FS | degraded | testnet mainnet | agave-validator solana-test-validator firedancer unknown | Storage capacity and headroom | docs.anza.xyz/operations/requirements, Disk Storage<br>headroom figure is preflight's own, not published | 2026-08<br>2026-08 |
 | `PF-FS-0002` | FS | degraded | testnet mainnet | agave-validator solana-test-validator firedancer unknown | Accounts and ledger on separate devices | docs.anza.xyz/operations/requirements, Disk Storage | 2026-08 |
 | `PF-FS-0003` | FS | degraded | testnet mainnet | agave-validator solana-test-validator firedancer unknown | Storage is solid-state and local | docs.anza.xyz/operations/requirements, Disk Storage | 2026-08 |
-| `PF-FS-0004` | FS | advisory | testnet mainnet | agave-validator solana-test-validator firedancer unknown | noatime on validator filesystems | operator practice, not published by Anza | 2026-08 |
 | `PF-FS-0005` | FS | advisory | testnet mainnet | agave-validator solana-test-validator firedancer unknown | Filesystem is ext4 or xfs | docs.anza.xyz/operations/requirements, Disk Storage | 2026-08 |
 | `PF-FS-0006` | FS | degraded | testnet mainnet | agave-validator solana-test-validator firedancer unknown | Accounts filesystem supports direct I/O | v4.0 Validator/Changes | v4.2.1 |
 | `PF-FS-0007` | FS | degraded | testnet mainnet | agave-validator | Ledger retention fits the disk holding it | DEFAULT_MAX_BLOCKSTORE_SHREDS and the sizing comment above it in cleanup_service.rs | agave master |

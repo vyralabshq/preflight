@@ -194,17 +194,6 @@ pub static CHECKS: &[Check] = &[
         run: fs::storage_media,
     },
     Check {
-        id: "PF-FS-0004",
-        layer: Layer::Fs,
-        severity: Advisory,
-        title: "noatime on validator filesystems",
-        profiles: &[Testnet, Mainnet],
-        clients: ANY_CLIENT,
-        needs_root: false,
-        source: fs::S_OPERATOR,
-        run: fs::noatime,
-    },
-    Check {
         id: "PF-FS-0005",
         layer: Layer::Fs,
         severity: Advisory,

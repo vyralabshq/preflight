@@ -932,7 +932,6 @@ fn shared_spinning_zfs_storage_is_caught_on_every_axis() {
     ]);
     assert!(o.contains("accounts and ledger both on sda"), "{o}");
     assert!(flat(&o).contains("on spinning disk sda"), "{o}");
-    assert!(flat(&o).contains("has no noatime"), "{o}");
     assert!(flat(&o).contains("/mnt/shared/accounts on zfs"), "{o}");
     assert!(flat(&o).contains("does not support O_DIRECT"), "{o}");
 }
@@ -1202,34 +1201,6 @@ fn snapshots_beside_the_ledger_is_not_a_finding() {
         !head.contains("FAIL"),
         "snapshots beside the ledger is normal:\n{head}"
     );
-}
-
-/// noatime is operator practice. Anza's requirements page does not mention it,
-/// so citing that page for it would be inventing a source.
-#[test]
-fn noatime_is_not_cited_to_anza() {
-    let inv = invocation(
-        "noatime-check.txt",
-        "exec agave-validator --accounts /mnt/shared/a --ledger /mnt/shared/l\n",
-    );
-    let (o, _) = run(&[
-        "--root",
-        &host(&SHARED_DISK),
-        "--invocation",
-        inv.to_str().unwrap(),
-        "--client",
-        "agave-validator@4.2.1",
-        "--profile",
-        "testnet",
-        "-v",
-    ]);
-    let block = o.split("PF-FS-0004").nth(1).unwrap_or_default();
-    let cited = block.split("source").nth(1).unwrap_or_default();
-    assert!(
-        !cited.contains("docs.anza.xyz"),
-        "Anza does not publish noatime:\n{cited}"
-    );
-    assert!(block.contains("Anza does not publish this one"), "{block}");
 }
 
 /// Core count is not the metric. Anza lists 12/24 as a guide; the community
@@ -2131,34 +2102,6 @@ fn no_title_touches_its_status() {
             "the status needs clear air after the title:\n{line}"
         );
     }
-}
-
-/// A FAIL with no fix is half a finding, and the option lives on the mount
-/// rather than the path the validator was given.
-#[test]
-fn noatime_says_how_to_set_it() {
-    let atime = Host {
-        name: "no-noatime",
-        mounts: "/dev/nvme0n1p2 / ext4 rw,relatime 0 0\n\
-                 /dev/nvme1n1 /mnt/accounts xfs rw,relatime 0 0\n",
-        ..WRAPPER_SCRIPT_UNIT
-    };
-    let (o, _) = run(&[
-        "--root",
-        &host(&atime),
-        "--client",
-        "agave-validator@4.3.0",
-        "--profile",
-        "testnet",
-    ]);
-    let block = block_for(&o, "PF-FS-0004");
-    assert!(block.contains("FAIL"), "{block}");
-    assert!(flat(block).contains("/etc/fstab"), "{block}");
-    assert!(flat(block).contains("remount,noatime"), "{block}");
-    assert!(
-        flat(block).contains("watch the node"),
-        "remounting / deserves the caveat:\n{block}"
-    );
 }
 
 /// Anza's XDP guide names ice next to bnxt_en: do not pass zero-copy.

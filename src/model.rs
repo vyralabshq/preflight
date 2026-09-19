@@ -169,7 +169,7 @@ impl Profile {
                 min_free: 0.10,
                 base_clock_mhz: Some(2800.0),
                 disk_gb: Some(250.0),
-                cores: None,
+                cores: Some(16),
             },
             Profile::Local => Thresholds {
                 accounts_gb: None,

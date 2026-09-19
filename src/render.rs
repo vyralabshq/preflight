@@ -488,6 +488,24 @@ fn phase_block(
     let advisory = with_severity("advisory");
     let unknown = count(Status::Unknown);
     let ran = mine.len() - count(Status::Skipped);
+    // Name what a count refers to, so the verdict is readable without
+    // scrolling to find which finding it means.
+    let subjects = |sevs: &[&str]| {
+        let names: Vec<String> = mine
+            .iter()
+            .filter(|f| {
+                f.outcome.status == Status::Fail && sevs.contains(&f.severity)
+                    || sevs.contains(&"ephemeral") && f.outcome.status == Status::Ephemeral
+            })
+            .map(|f| format!("{} {}", f.id, f.title.to_lowercase()))
+            .collect();
+        // Naming one or two saves a scroll. Naming ten is a wall, and the list
+        // of ids below already carries that.
+        match names.len() {
+            0 | 3.. => String::new(),
+            _ => format!(":  {}", names.join(",  ")),
+        }
+    };
 
     // When the reason is the operating system, say that rather than a count.
     if phase == Phase::Machine && !ctx.is_linux() && !ctx.fs.is_prefixed() {
@@ -523,13 +541,23 @@ fn phase_block(
         (_, _, m, a, _) if m > 0 => {
             let tail = match a {
                 0 => String::new(),
-                n => format!(", and {n} thing{} worth fixing", plural(n, "", "s")),
+                n => format!(
+                    ", and {n} thing{} worth fixing{}",
+                    plural(n, "", "s"),
+                    subjects(&["advisory"])
+                ),
             };
-            format!("no. {m} requirement{} not met{tail}", plural(m, "", "s"))
+            format!(
+                "no. {m} requirement{} not met{}{tail}",
+                plural(m, "", "s"),
+                subjects(&["fatal", SLOWS, "ephemeral"])
+            )
         }
-        (_, _, _, a, _) if a > 0 => {
-            format!("yes, with {a} thing{} worth fixing", plural(a, "", "s"))
-        }
+        (_, _, _, a, _) if a > 0 => format!(
+            "yes, with {a} thing{} worth fixing{}",
+            plural(a, "", "s"),
+            subjects(&["advisory"])
+        ),
         (_, _, _, _, u) if u > 0 => format!(
             "cannot say. {u} thing{} could not be read",
             plural(u, "", "s")

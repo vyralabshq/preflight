@@ -405,9 +405,14 @@ fn flat(text: &str) -> String {
 
 /// Just one finding's block, ending where the next one starts.
 fn block_for<'a>(output: &'a str, id: &str) -> &'a str {
-    let after = match output.split_once(id) {
+    // The verdict names ids too, so anchor on a finding header rather than the
+    // first mention anywhere in the report.
+    let after = match output.split_once(&format!("  {id}  ")) {
         Some((_, rest)) => rest,
-        None => return "",
+        None => match output.split_once(id) {
+            Some((_, rest)) => rest,
+            None => return "",
+        },
     };
     match after.find("\n  PF-") {
         Some(end) => &after[..end],
@@ -3212,9 +3217,10 @@ fn boost_is_never_reported_as_the_base_clock() {
     );
 }
 
-/// Over Anza's 12 and under our mainnet 24 reads as tight, on mainnet only.
+/// Each cluster has its own floor above Anza's 12: 16 carries testnet, and
+/// mainnet asks for 24. Both are operator figures and say so.
 #[test]
-fn a_box_over_anzas_minimum_can_still_be_tight_for_mainnet() {
+fn each_cluster_has_its_own_core_floor() {
     let root = host(&Host {
         name: "sixteen-cores",
         cores: 16,
@@ -3235,14 +3241,14 @@ fn a_box_over_anzas_minimum_can_still_be_tight_for_mainnet() {
 
     assert!(
         block_for(&run(&args("testnet")).0, "PF-HW-0004").contains("PASS"),
-        "testnet applies no core figure, so there is nothing to report"
+        "16 is the testnet floor and this box is on it"
     );
     let m = run(&args("mainnet")).0;
     let block = block_for(&m, "PF-HW-0004");
     assert!(block.contains("FAIL"), "{block}");
     assert!(
-        flat(block).contains("over Anza's 12 but under the 24"),
-        "say it clears Anza and still asks for more:\n{block}"
+        flat(block).contains("under the 24 this asks for"),
+        "name the floor it misses:\n{block}"
     );
     assert!(
         flat(block).contains("not published"),
@@ -3395,4 +3401,39 @@ fn a_multibyte_title_does_not_panic() {
     // and the real renderer survives every title in the registry
     let (o, _) = run(&["--dump-registry"]);
     assert!(o.lines().count() > 40, "{o}");
+}
+
+/// A count with no subject makes the reader scroll to find out what it means.
+/// One or two get named; ten would be a wall, and the id list below covers it.
+#[test]
+fn a_short_verdict_names_what_it_counts() {
+    let (one, _) = run(&[
+        "--root",
+        &host(&XDP_AMBIENT_OK),
+        "--client",
+        "agave-validator@4.3.0",
+        "--profile",
+        "testnet",
+    ]);
+    assert!(
+        one.contains("PF-SVC-0001 unit depends on the mounts it writes to"),
+        "a single finding is named in the verdict:\n{one}"
+    );
+
+    let (many, _) = run(&[
+        "--root",
+        &host(&WRAPPER_SCRIPT_UNIT),
+        "--client",
+        "agave-validator@4.3.0",
+        "--profile",
+        "testnet",
+    ]);
+    let verdict = many
+        .lines()
+        .find(|l| l.contains("requirement") && l.contains("not met"))
+        .unwrap_or_default();
+    assert!(
+        !verdict.contains("PF-"),
+        "ten findings is a wall, not a summary:\n{verdict}"
+    );
 }

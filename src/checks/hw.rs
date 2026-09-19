@@ -216,15 +216,21 @@ pub fn cores(ctx: &Ctx) -> Outcome {
     let Some(want) = ctx.profile.thresholds().cores else {
         return Outcome::pass(observed, "Anza lists 12 cores / 24 threads for validators").why(WHY);
     };
-    let expected = format!("{want} physical cores for comfort on mainnet, over Anza's 12");
+    let expected = format!(
+        "{want} physical cores for {}, over Anza's 12",
+        ctx.profile.label()
+    );
     match physical {
         Some(p) if p < want => Outcome::fail(
-            format!("{observed}, over Anza's 12 but under the {want} this asks for"),
+            format!("{observed}, under the {want} this asks for"),
             expected,
         )
         .why(WHY)
         .fix(vec![
-            FixStep::step(format!("run mainnet on a part with {want} cores, or measure your PoH rate here and decide"))
+            FixStep::step(format!(
+                "run {} on a part with {want} cores, or measure your PoH rate here and decide",
+                ctx.profile.label()
+            ))
                 .note("no setting changes a core count; the listed parts report 14M to 23M hashes per second"),
         ]),
         Some(_) => Outcome::pass(observed, expected).why(WHY),

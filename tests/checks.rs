@@ -550,7 +550,7 @@ fn xdp_persistence_is_unknown_not_ephemeral_without_a_process() {
         "--client",
         "agave-validator@4.2.1",
     ]);
-    let block = o.split("PF-XDP-0007").nth(1).unwrap_or("");
+    let block = block_for(&o, "PF-XDP-0007");
     assert!(
         block.contains("UNKNOWN"),
         "cannot tell setcap from no grant here: {block}"
@@ -566,7 +566,7 @@ fn why_text_is_present_even_when_passing() {
         "agave-validator@4.2.1",
         "-v",
     ]);
-    let block = o.split("PF-ARG-0001").nth(1).unwrap_or("");
+    let block = block_for(&o, "PF-ARG-0001");
     assert!(
         block.contains("why"),
         "a passing check still explains itself: {block}"
@@ -625,7 +625,7 @@ fn port_range_false_pass_at_the_boundary_is_impossible() {
         "--profile",
         "testnet",
     ]);
-    let block = o.split("PF-ARG-0001").nth(1).unwrap_or_default();
+    let block = block_for(&o, "PF-ARG-0001");
     assert!(block.contains("FAIL"), "25 wide must fail: {block}");
     assert!(block.contains("(25 wide)"), "{block}");
 
@@ -972,7 +972,7 @@ fn a_bare_host_is_told_what_it_needs_and_how_to_ask() {
 fn wrong_architecture_is_unsupported_with_no_fix() {
     let (o, _) = run(&["--profile", "testnet"]);
     if o.contains("PF-HW-0001") {
-        let block = o.split("PF-HW-0001").nth(1).unwrap_or_default();
+        let block = block_for(&o, "PF-HW-0001");
         let head: String = block.lines().take(12).collect::<Vec<_>>().join("\n");
         if head.contains("UNSUPPORTED") {
             assert!(
@@ -1015,7 +1015,7 @@ fn skipped_checks_say_why_they_were_skipped() {
 #[test]
 fn an_adequate_kernel_default_is_not_ephemeral() {
     let (o, _) = run(&["--root", &host(&FRESH_UBUNTU), "--profile", "testnet", "-v"]);
-    let block = o.split("PF-KRN-0004").nth(1).unwrap_or_default();
+    let block = block_for(&o, "PF-KRN-0004");
     assert!(
         block.contains("PASS"),
         "fs.nr_open at its default is fine: {block}"
@@ -1303,7 +1303,7 @@ fn snapshots_beside_the_ledger_is_not_a_finding() {
         "--profile",
         "testnet",
     ]);
-    let block = o.split("PF-FS-0002").nth(1).unwrap_or_default();
+    let block = block_for(&o, "PF-FS-0002");
     let head: String = block.lines().take(2).collect::<Vec<_>>().join(" ");
     assert!(
         !head.contains("FAIL"),

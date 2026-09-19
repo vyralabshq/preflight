@@ -1306,18 +1306,22 @@ fn snapshots_beside_the_ledger_is_not_a_finding() {
     );
 }
 
-/// Anza lists 256 GB for validators and 512 GB as board capacity / RPC extra.
-/// Neither is a testnet FAIL — an invented 128 GB floor already false-failed
-/// a working node.
+/// Anza's 256 GB is a production figure, so it is reported on mainnet and says
+/// nothing on testnet. An invented 128 GB floor already false-failed a working
+/// node, so neither cluster fails on it.
 #[test]
-fn memory_check_names_anza_and_does_not_fail_125gb() {
-    let (o, _) = run(&["--root", &host(&FRESH_UBUNTU), "--profile", "testnet", "-v"]);
+fn memory_names_anza_on_mainnet_and_is_quiet_on_testnet() {
+    let (o, _) = run(&["--root", &host(&FRESH_UBUNTU), "--profile", "mainnet", "-v"]);
     let block = block_for(&o, "PF-HW-0005");
     assert!(flat(block).contains("256 GB"), "{block}");
     assert!(flat(block).contains("512 GB"), "{block}");
+    assert!(block.contains("REPORTED"), "{block}");
+
+    let (o, _) = run(&["--root", &host(&FRESH_UBUNTU), "--profile", "testnet", "-v"]);
+    let block = block_for(&o, "PF-HW-0005");
     assert!(
-        block.contains("REPORTED"),
-        "a measured value with no fail threshold is not Unknown:\n{block}"
+        block.contains("PASS"),
+        "nobody publishes a testnet figure, so there is nothing to report:\n{block}"
     );
     let small = Host {
         name: "small-memory",
@@ -1451,10 +1455,10 @@ fn zero_copy_on_a_driver_that_refuses_it_is_reported() {
     assert!(flat(block).contains("remove --xdp-zero-copy"), "{block}");
 }
 
-/// Absence from the community list is not failure on testnet, where hardware
-/// varies widely. On mainnet it is worth knowing before taking stake.
+/// The community list only carries advice worth acting on before taking stake,
+/// so it does not run on testnet. On mainnet absence is still not a failure.
 #[test]
-fn an_unlisted_cpu_is_reported_on_testnet_and_flagged_on_mainnet() {
+fn an_unlisted_cpu_is_reported_on_mainnet_only() {
     let unlisted = Host {
         name: "unlisted-cpu",
         cpu_model: "AMD EPYC 7313P 16-Core Processor",
@@ -1463,10 +1467,9 @@ fn an_unlisted_cpu_is_reported_on_testnet_and_flagged_on_mainnet() {
     let root = host(&unlisted);
 
     let (testnet, _) = run(&["--root", &root, "--profile", "testnet", "-v"]);
-    let block = block_for(&testnet, "PF-HW-0006");
     assert!(
-        block.contains("REPORTED"),
-        "measured but unjudgeable is not a failed probe:\n{block}"
+        block_for(&testnet, "PF-HW-0006").contains("SKIPPED"),
+        "a figure only useful before taking stake does not belong on testnet"
     );
 
     let (mainnet, _) = run(&["--root", &root, "--profile", "mainnet", "-v"]);
@@ -3231,8 +3234,8 @@ fn a_box_over_anzas_minimum_can_still_be_tight_for_mainnet() {
     };
 
     assert!(
-        block_for(&run(&args("testnet")).0, "PF-HW-0004").contains("REPORTED"),
-        "testnet applies no core figure"
+        block_for(&run(&args("testnet")).0, "PF-HW-0004").contains("PASS"),
+        "testnet applies no core figure, so there is nothing to report"
     );
     let m = run(&args("mainnet")).0;
     let block = block_for(&m, "PF-HW-0004");

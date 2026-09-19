@@ -77,7 +77,7 @@ pub static CHECKS: &[Check] = &[
         layer: Layer::Hw,
         severity: Degraded,
         title: "CPU is one somebody has reported on",
-        profiles: &[Testnet, Mainnet],
+        profiles: &[Mainnet],
         clients: ANY_CLIENT,
         needs_root: false,
         source: hw::S_HCL,

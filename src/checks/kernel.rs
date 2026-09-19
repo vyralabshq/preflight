@@ -267,10 +267,13 @@ pub fn xdp_floor(ctx: &Ctx) -> Outcome {
         };
         // Above AF_XDP, below Anza's zero copy number. Nothing is wrong today,
         // and the only thing the operator cannot do is turn zero copy on.
-        return Outcome::reported(
-            format!("{observed}, which carries XDP in copy mode but not zero copy"),
+        // Nothing is unmet, so this is not a finding. Zero copy is a ceiling
+        // the invocation is not asking for, and saying so twice is noise.
+        return Outcome::pass(
+            format!("{observed}, carrying XDP in copy mode"),
             format!(
-                "no requirement unmet; zero copy would want {}.{} and is not in use",
+                "AF_XDP for copy mode, which this clears; zero copy would want {}.{} and is not \
+                 in use",
                 floor.0, floor.1
             ),
         )

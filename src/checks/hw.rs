@@ -214,11 +214,7 @@ pub fn cores(ctx: &Ctx) -> Outcome {
         return Outcome::pass(observed, "enough for a test validator").why(WHY);
     }
     let Some(want) = ctx.profile.thresholds().cores else {
-        return Outcome::reported(
-            observed,
-            "Anza lists 12 cores / 24 threads for validators; preflight does not fail on the figure",
-        )
-        .why(WHY);
+        return Outcome::pass(observed, "Anza lists 12 cores / 24 threads for validators").why(WHY);
     };
     let expected = format!("{want} physical cores for comfort on mainnet, over Anza's 12");
     match physical {
@@ -268,8 +264,10 @@ pub fn memory(ctx: &Ctx) -> Outcome {
     // version failed anything under 128 GB, a number nobody published, and it
     // failed a working validator.
     match ctx.profile {
-        Profile::Local => Outcome::pass(observed, "enough for a test validator").why(WHY),
-        _ => Outcome::reported(observed, EXPECTED).why(WHY),
+        // Anza's 256 GB is a production figure and nobody publishes a testnet
+        // one. Reporting it there is noise on a box with nothing wrong.
+        Profile::Mainnet => Outcome::reported(observed, EXPECTED).why(WHY),
+        _ => Outcome::pass(observed, "no published figure for this cluster").why(WHY),
     }
 }
 

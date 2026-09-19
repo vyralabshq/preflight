@@ -15,6 +15,13 @@ pub const PORT_RANGE_MIN_WIDTH: u16 = 26;
 /// Flags whose help text shows a required value placeholder. A flag from this
 /// list with the next token being another flag means the shell line lost a
 /// value, and clap either swallows the following flag or refuses to start.
+pub const S_LISTED: &[Source] = &[Source {
+    kind: LocalHelp,
+    locator: "flags listed by the validator binary's own --help",
+    verified_against: "this host",
+    provisional: false,
+}];
+
 pub const S_NEEDS_VALUE: &[Source] = &[Source {
     kind: LocalHelp,
     locator: "value placeholders in agave-validator --help",
@@ -821,4 +828,94 @@ pub fn tpu_connection_pool_size(ctx: &Ctx) -> Outcome {
             ctx,
             vec![FixStep::step("remove --tpu-connection-pool-size")],
         ))
+}
+
+/// True when the help text lists this exact flag, not one that starts with it.
+fn help_lists(text: &str, flag: &str) -> bool {
+    text.match_indices(flag).any(|(i, _)| {
+        let after = text[i + flag.len()..].chars().next();
+        let before = text[..i].chars().next_back();
+        !matches!(after, Some(c) if c.is_ascii_alphanumeric() || c == '-')
+            && !matches!(before, Some(c) if c.is_ascii_alphanumeric() || c == '-')
+    })
+}
+
+/// PF-ARG-0015. Flags the binary about to run does not accept.
+pub fn flags_exist_on_this_binary(ctx: &Ctx) -> Outcome {
+    const WHY: &str = "Every other check in this layer asks whether a requirement has arrived \
+        yet, which is the question an upgrade poses. A downgrade poses the opposite one, and \
+        nothing asked it: a flag from a newer release sits in the command line, the binary \
+        rejects it, and clap exits before anything starts. systemd then retries on a timer, so \
+        the node is simply never up. This asks the binary the command line names what it \
+        accepts, which covers every flag and every release without a table to maintain. It reads \
+        --help for existence only, never for default values, because clap's rendering of those \
+        is not stable and a confident wrong default is worse than none.";
+    const EXPECTED: &str = "every flag accepted by the binary that will run";
+
+    let inv = match require_invocation(ctx) {
+        Ok(i) => i,
+        Err(o) => return *o,
+    };
+    let Some(help) = ctx.local_help.as_ref() else {
+        return Outcome::skipped("the binary in the command line was not run with --help");
+    };
+
+    let unknown: Vec<String> = inv
+        .args
+        .iter()
+        .filter(|a| a.starts_with("--"))
+        .map(|a| a.split('=').next().unwrap_or(a).to_string())
+        .filter(|f| f.len() > 2 && !f.contains('$'))
+        .filter(|f| !help_lists(&help.text, f))
+        .collect();
+
+    if unknown.is_empty() {
+        return Outcome::pass(format!("every flag is listed by {}", help.bin), EXPECTED).why(WHY);
+    }
+    // If the running process is this same binary, it already accepted this
+    // command line, so a flag missing from --help is a hidden one. Saying a
+    // running node will not start is the worst answer available.
+    if running_this_binary(ctx, &help.bin) {
+        return Outcome::reported(
+            format!(
+                "{} is not listed by {}, but the validator is running on that binary with it",
+                unknown.join(", "),
+                help.bin
+            ),
+            EXPECTED,
+        )
+        .why(format!(
+            "{WHY} Here the binary took it anyway, so these are hidden rather than removed. It \
+             matters on the next version change, when a hidden flag may stop being accepted."
+        ));
+    }
+    Outcome::fail(
+        format!("{} is not listed by {}", unknown.join(", "), help.bin),
+        EXPECTED,
+    )
+    .why(format!(
+        "{WHY} One caveat preflight cannot see past: clap lets a deprecated flag be hidden, so a \
+         flag missing from --help is usually removed but could be one that still parses."
+    ))
+    .fix(edit_steps(
+        ctx,
+        unknown
+            .iter()
+            .map(|f| FixStep::step(format!("remove or rename {f}")))
+            .collect(),
+    ))
+    .verify(format!("{} --help | grep -- {}", help.bin, unknown[0]))
+}
+
+/// Whether the running validator is the same binary the command line names.
+/// During a downgrade it is not: the old process is up and the new binary is
+/// already on disk, which is the case this check exists for.
+fn running_this_binary(ctx: &Ctx, bin: &str) -> bool {
+    let Some(pid) = ctx.validator_pid.as_ref() else {
+        return false;
+    };
+    let Ok(running) = std::fs::read_link(format!("/proc/{pid}/exe")) else {
+        return false;
+    };
+    std::fs::canonicalize(bin).is_ok_and(|named| named == running)
 }

@@ -414,6 +414,17 @@ pub static CHECKS: &[Check] = &[
         run: arg::flags_have_values,
     },
     Check {
+        id: "PF-ARG-0015",
+        layer: Layer::Arg,
+        severity: Fatal,
+        title: "Every flag exists on the binary that will run",
+        profiles: &[Local, Testnet, Mainnet],
+        clients: AGAVE,
+        needs_root: false,
+        source: arg::S_LISTED,
+        run: arg::flags_exist_on_this_binary,
+    },
+    Check {
         id: "PF-SVC-0001",
         layer: Layer::Service,
         severity: Degraded,

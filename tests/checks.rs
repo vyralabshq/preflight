@@ -3250,3 +3250,132 @@ fn a_box_over_anzas_minimum_can_still_be_tight_for_mainnet() {
         "both sources, so nobody reads 24 as Anza's:\n{block}"
     );
 }
+
+/// The flag that stopped a live validator booting after a downgrade. Every
+/// other ARG check asks whether a requirement has arrived yet, which is the
+/// upgrade question; nothing asked whether the binary accepts what it is given.
+#[test]
+fn a_flag_the_binary_does_not_accept_is_a_finding() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scratch("help-422");
+    let bin = dir.join("agave-validator");
+    std::fs::write(
+        &bin,
+        "#!/bin/sh\ncat <<'H'\nagave-validator 4.2.2\nOPTIONS:\n\
+         \x20   --ledger <DIR>\n    --accounts <PATHS>\n    --identity <PATH>\n\
+         \x20   --vote-account <PATH>\n    --entrypoint <HOST>\n\
+         \x20   --limit-ledger-size <SHRED_COUNT>\n    --dynamic-port-range <RANGE>\nH\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let line = format!(
+        "exec {} --identity /i.json --vote-account /v.json \
+         --entrypoint e:8001 --ledger /mnt/ledger --accounts /mnt/accounts \
+         --dynamic-port-range 8000-8030 --limit-blockstore-size 300000000",
+        bin.display()
+    );
+    let inv = dir.join("cmdline.txt");
+    std::fs::write(&inv, &line).unwrap();
+
+    let (o, _) = run(&[
+        "--invocation",
+        inv.to_str().unwrap(),
+        "--client",
+        "agave-validator@4.2.2",
+        "--profile",
+        "testnet",
+        "-v",
+    ]);
+    let block = block_for(&o, "PF-ARG-0015");
+    assert!(block.contains("FAIL"), "{block}");
+    assert!(
+        flat(block).contains("--limit-blockstore-size is not listed"),
+        "name the flag the binary rejects:\n{block}"
+    );
+    // --ledger is listed and must not be dragged in by a prefix match.
+    assert!(
+        !flat(block).contains("--ledger is not listed"),
+        "a listed flag is not missing:\n{block}"
+    );
+    assert!(
+        flat(block).contains("hidden"),
+        "a flag absent from --help could still parse; say so:\n{block}"
+    );
+}
+
+/// preflight's promise is that it runs nothing you have not seen. It now runs
+/// two commands, so the report has to name both.
+#[test]
+fn both_executed_commands_are_printed() {
+    let o = run(&[
+        "--invocation",
+        scratch("help-422").join("cmdline.txt").to_str().unwrap(),
+        "--client",
+        "agave-validator@4.2.2",
+        "--profile",
+        "testnet",
+    ])
+    .0;
+    assert!(
+        flat(&o).contains("--help"),
+        "the help run is disclosed:\n{o}"
+    );
+
+    // --no-exec must still mean nothing runs.
+    let quiet = run(&[
+        "--invocation",
+        scratch("help-422").join("cmdline.txt").to_str().unwrap(),
+        "--client",
+        "agave-validator@4.2.2",
+        "--profile",
+        "testnet",
+        "--no-exec",
+    ])
+    .0;
+    assert!(
+        !flat(&quiet).contains("flags checked against"),
+        "--no-exec runs neither:\n{quiet}"
+    );
+}
+
+/// A script writes ~ literally and preflight runs no shell, so it has to expand
+/// it. /home/<user> is a guess: this operator's home is somewhere else, and a
+/// wrong path would exec a binary nobody named.
+#[test]
+fn a_tilde_path_expands_from_passwd_not_from_a_guess() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scratch("tilde-home");
+    let home = dir.join("var-lib-solana");
+    std::fs::create_dir_all(home.join("bin")).unwrap();
+    let bin = home.join("bin/agave-validator");
+    std::fs::write(
+        &bin,
+        "#!/bin/sh\ncat <<'H'\nOPTIONS:\n    --ledger <DIR>\n    --accounts <PATHS>\nH\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let root = validator("tilde-validator")
+        .file(
+            "/etc/passwd",
+            &format!(
+                "root:x:0:0::/root:/bin/sh\nsol:x:1001:1001::{}:/bin/bash\n",
+                home.display()
+            ),
+        )
+        .file(
+            "/home/sol/bin/validator.sh",
+            "#!/bin/bash\nexec ~/bin/agave-validator --ledger /mnt/ledger \
+             --accounts /mnt/accounts --identity /i.json --vote-account /v.json \
+             --entrypoint e:8001 --dynamic-port-range 8000-8030\n",
+        )
+        .build();
+    let o = report(&root);
+    // Under --root nothing execs, so this asserts the resolution did not invent
+    // /home/sol and claim a binary there.
+    assert!(
+        !flat(&o).contains("/home/sol/bin/agave-validator"),
+        "/home/<user> is not where this user's home is:\n{o}"
+    );
+}

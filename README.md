@@ -38,9 +38,11 @@ nothing looks wrong until the setting it controlled quietly stops applying. A
 power saving CPU governor holds your cores below their own base clock while every
 tool on the box reports the machine healthy.
 
-It never writes to your system, never uses sudo, and runs one command:
-`<your validator> --version`, printed in every report. `--no-exec` disables even
-that. When it cannot read something it says `UNKNOWN` and why.
+It never writes to your system, never uses sudo, and runs two commands, both
+against your own validator binary and both printed in the report:
+`--version` and `--help`. The help text is read for flag existence only, never
+for default values. `--no-exec` disables both. When it cannot read something it
+says `UNKNOWN` and why.
 
 ## What you see
 

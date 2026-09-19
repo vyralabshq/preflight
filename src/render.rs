@@ -233,6 +233,12 @@ fn system_report(ctx: &Ctx, st: &Style, needs_root: usize) -> String {
     {
         row!("", st.dim(&format!("version read by running: {cmd}")));
     }
+    if let Some(h) = ctx.local_help.as_ref() {
+        row!(
+            "",
+            st.dim(&format!("flags checked against: {} --help", h.bin))
+        );
+    }
     // Where the configuration is, not where a change goes: the fix file can
     // be a drop-in that does not exist yet.
     if let Some(inv) = ctx.inv() {

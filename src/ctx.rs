@@ -20,6 +20,11 @@ pub enum VersionSource {
     Undetected(&'static str),
 }
 
+pub struct LocalHelp {
+    pub bin: String,
+    pub text: String,
+}
+
 pub struct Ctx {
     pub fs: Rootfs,
     pub profile: Profile,
@@ -35,6 +40,9 @@ pub struct Ctx {
     pub invocation: Option<Invocation>,
     pub invocation_trail: Vec<String>,
     pub validator_pid: Option<String>,
+    /// What the binary in the command line says it accepts. Read once, used
+    /// only to ask whether a flag exists, never for a default.
+    pub local_help: Option<LocalHelp>,
     /// Whether this host has a validator at all: a binary, a unit, or a running
     /// process. Absent one, checks are Skipped rather than Unknown: there is
     /// nothing to probe, which is different from failing to probe it.
@@ -253,10 +261,62 @@ fn detect_version(
 
 /// A hung binary must not hang a read-only tool, so this waits a few seconds
 /// and gives up rather than blocking on output.
+/// The binary the command line will actually run, as an absolute path. Not the
+/// running process: a downgrade swaps the binary while the old one is still up,
+/// and that gap is the whole point of asking.
+fn binary_to_run(fs: &Rootfs, inv: &Invocation) -> Option<String> {
+    let raw = inv.program.clone();
+    // A script writes ~ literally; preflight does not run a shell, so expand it
+    // from the unit's User= rather than from whoever is running preflight.
+    let path = match raw.strip_prefix("~/") {
+        // Ctx does not exist yet here, so read User= straight from the unit,
+        // then that user's real home from passwd. /home/<user> is a guess, and
+        // a wrong path here would exec something the operator did not name.
+        Some(rest) => {
+            let unit = inv.unit_path.as_ref()?;
+            let text = fs.read(unit).ok()?;
+            let user = text
+                .lines()
+                .filter_map(|l| l.trim().strip_prefix("User="))
+                .next_back()?
+                .trim();
+            let passwd = fs.read("/etc/passwd").ok()?;
+            let home = passwd
+                .lines()
+                .filter(|l| l.starts_with(&format!("{user}:")))
+                .filter_map(|l| l.split(':').nth(5))
+                .next()?;
+            format!("{}/{rest}", home.trim_end_matches('/'))
+        }
+        None => raw,
+    };
+    if !path.starts_with('/') {
+        return None;
+    }
+    let name = path.rsplit('/').next().unwrap_or_default();
+    crate::argv::is_validator_bin(name).then_some(path)
+}
+
+/// `<validator> --help`, for flag existence only. Never for defaults: clap's
+/// rendering of those is not stable, and a confident wrong default is worse
+/// than none.
+fn read_local_help(fs: &Rootfs, inv: Option<&Invocation>, no_exec: bool) -> Option<LocalHelp> {
+    if no_exec || fs.is_prefixed() || unsafe { libc_getuid() } == 0 {
+        return None;
+    }
+    let bin = binary_to_run(fs, inv?)?;
+    let text = run_tool(&bin, "--help")?;
+    (text.contains("--ledger")).then_some(LocalHelp { bin, text })
+}
+
 fn run_version(bin: &str) -> Option<String> {
+    run_tool(bin, "--version")
+}
+
+fn run_tool(bin: &str, arg: &str) -> Option<String> {
     use std::process::Stdio;
     let mut child = Command::new(bin)
-        .arg("--version")
+        .arg(arg)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -340,6 +400,7 @@ impl Ctx {
             _ => None,
         };
 
+        let local_help = read_local_help(&fs, invocation.as_ref(), opts.no_exec);
         Ctx {
             os: os_release(&fs),
             kernel: kernel(&fs),
@@ -358,6 +419,7 @@ impl Ctx {
             invocation_trail,
             version_source,
             validator_pid,
+            local_help,
             validator_present,
         }
     }

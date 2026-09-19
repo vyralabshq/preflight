@@ -8,6 +8,8 @@ repository = "https://github.com/vyralabshq/preflight"
 readme = "README.md"
 keywords = ["solana", "validator", "agave", "ops"]
 categories = ["command-line-utilities"]
+# let-chains, used in five files, are stable from here.
+rust-version = "1.88"
 
 [[bin]]
 name = "preflight"

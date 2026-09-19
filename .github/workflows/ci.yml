@@ -20,3 +20,12 @@ jobs:
       # The registry is the contract. Drift should be a reviewable diff.
       - run: cargo run --quiet -- --dump-registry > /tmp/registry.md
       - run: diff -u docs/registry.md /tmp/registry.md
+
+  # The rust-version in Cargo.toml is a claim. This is what checks it.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked

@@ -3379,3 +3379,17 @@ fn a_tilde_path_expands_from_passwd_not_from_a_guess() {
         "/home/<user> is not where this user's home is:\n{o}"
     );
 }
+
+/// Title truncation used to slice a str by bytes, which panics mid-character.
+/// A read-only tool must not crash formatting its own output.
+#[test]
+fn a_multibyte_title_does_not_panic() {
+    let long: String = "é".repeat(60);
+    assert_eq!(
+        long.chars().take(45).collect::<String>().chars().count(),
+        45
+    );
+    // and the real renderer survives every title in the registry
+    let (o, _) = run(&["--dump-registry"]);
+    assert!(o.lines().count() > 40, "{o}");
+}

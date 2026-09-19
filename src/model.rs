@@ -258,7 +258,7 @@ pub struct Source {
 /// value: one quoted a default read from the wrong struct, the other renamed a
 /// flag whose name carried its unit without checking the replacement's. Making
 /// the question unrepresentable-as-unanswered is cheaper than remembering.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum ValueCarry {
     /// Nothing was set, so nothing has to carry.
     NoValueSet,
@@ -269,8 +269,9 @@ pub enum ValueCarry {
     /// Same unit, different scale, with the reason.
     #[allow(dead_code)]
     Converted(&'static str),
-    /// Counts or measures a different thing.
-    DifferentSemantics(&'static str),
+    /// Counts or measures a different thing. Carries the value to write, since
+    /// a fix nobody can copy is half a fix.
+    DifferentSemantics(String, &'static str),
     /// preflight has not verified this. Never renders a substitution.
     Unverified,
 }
@@ -332,10 +333,13 @@ impl FixStep {
                 FixStep::step(format!("{from} {v}   ->   {to} {v}"))
             }
             (ValueCarry::Identical, None) => FixStep::step(format!("{from}   ->   {to}")),
-            (ValueCarry::Converted(note) | ValueCarry::DifferentSemantics(note), Some(v)) => {
+            (ValueCarry::DifferentSemantics(suggested, note), Some(v)) => {
+                FixStep::step(format!("{from} {v}   ->   {to} {suggested}")).note(note)
+            }
+            (ValueCarry::Converted(note), Some(v)) => {
                 FixStep::step(format!("{from} {v}   ->   {to} <see note>")).note(note)
             }
-            (ValueCarry::Converted(note) | ValueCarry::DifferentSemantics(note), None) => {
+            (ValueCarry::Converted(note) | ValueCarry::DifferentSemantics(_, note), None) => {
                 FixStep::step(format!("{from}   ->   {to}")).note(note)
             }
         }

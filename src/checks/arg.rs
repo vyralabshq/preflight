@@ -760,8 +760,9 @@ pub fn limit_ledger_size(ctx: &Ctx) -> Outcome {
                         "--limit-blockstore-size",
                         Some(&n),
                         ValueCarry::DifferentSemantics(
-                            "the new flag counts coding shreds too, so roughly double it; a \
-                             starting point, not a conversion",
+                            doubled.clone(),
+                            "Anza's changelog says to double a non-default value as a starting \
+                             point, not as a conversion",
                         ),
                     )],
                 ))

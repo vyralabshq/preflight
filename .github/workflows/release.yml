@@ -1,0 +1,28 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  binary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      # musl links static, so one binary runs on every glibc a validator box ships.
+      - run: cargo build --release --locked --target x86_64-unknown-linux-musl
+      - name: package
+        run: |
+          install -m755 target/x86_64-unknown-linux-musl/release/preflight preflight-x86_64-linux
+          sha256sum preflight-x86_64-linux > preflight-x86_64-linux.sha256
+      # Catch a broken build here, not after it is public.
+      - run: ./preflight-x86_64-linux --version
+      - run: gh release create "$GITHUB_REF_NAME" --generate-notes preflight-x86_64-linux preflight-x86_64-linux.sha256
+        env:
+          GH_TOKEN: ${{ github.token }}

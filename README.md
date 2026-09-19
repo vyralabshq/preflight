@@ -73,6 +73,17 @@ checks are listed by name, so you can see what was looked at.
 ## Install
 
 ```
+curl -fsSLO https://github.com/vyralabshq/preflight/releases/latest/download/preflight-x86_64-linux
+chmod +x preflight-x86_64-linux
+./preflight-x86_64-linux
+```
+
+Static binary, no runtime dependency and no toolchain on the box. The sha256 sits
+beside it on the release page.
+
+From source, if you would rather build it yourself:
+
+```
 cargo install --git https://github.com/vyralabshq/preflight
 ```
 

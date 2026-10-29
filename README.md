@@ -153,7 +153,7 @@ is that list committed, so a changed source or severity shows up as a diff.
 
 ## Status
 
-Early. Checks run against fixtures in CI and against a live testnet validator.
+Early. Checks run against fixtures in CI, and ran against our live testnet validator until 29 Oct 2026.
 A check needing an elevated read prints the command for you to run.
 `scripts/pf-dump.sh` captures a host snapshot, redacting metrics credentials and
 never reading keypairs.
